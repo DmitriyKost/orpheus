@@ -155,7 +155,7 @@ pub fn scan_music() -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-pub fn jump() -> io::Result<usize> {
+pub fn jump() -> io::Result<Option<usize>> {
     let queue = get_queue()?;
 
     if queue.is_empty() {
@@ -168,12 +168,12 @@ pub fn jump() -> io::Result<usize> {
     )?;
 
     if selected.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::Other, "nothing's selected"));
+        return Ok(None);
     }
 
     let chosen_filename = selected[0].to_string_lossy().to_string();
     if let Some(index) = queue.iter().position(|f| *f == chosen_filename) {
-        Ok(index)
+        Ok(Some(index))
     } else {
         Err(io::Error::new(
             io::ErrorKind::Other,

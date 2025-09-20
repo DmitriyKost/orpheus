@@ -50,6 +50,18 @@ fn mpv_json_command(cmd: MpvCommand) -> String {
     format!(r#"{{ "command": [{}] }}"#, cmd) + "\n"
 }
 
+pub fn is_running() -> bool {
+    let config = CONFIG.get().expect("config not initialized");
+
+    let socket_path = &config.socket_path;
+
+    if !Path::new(socket_path).exists() {
+        return false;
+    }
+
+    UnixStream::connect(socket_path).is_ok()
+}
+
 pub fn spawn() -> io::Result<()> {
     let config = CONFIG.get().expect("config not initialized");
     if Path::new(&config.socket_path).exists() {
@@ -77,6 +89,7 @@ pub fn spawn() -> io::Result<()> {
 
     cmd.arg("--idle=yes")
         .arg("--no-video")
+        .arg("--af=dynaudnorm=f=75:g=25:p=0.55")
         .arg("--force-window=no")
         .arg("--really-quiet")
         .arg(format!(

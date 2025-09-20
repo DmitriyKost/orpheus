@@ -94,7 +94,11 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    mpv::spawn()?;
+    std::thread::spawn(|| {
+        if let Err(e) = mpv::spawn() {
+            eprintln!("Failed to spawn MPV: {}", e);
+        }
+    });
 
     let command = match Command::parse(&args) {
         Some(cmd) => cmd,
@@ -177,15 +181,25 @@ fn main() -> std::io::Result<()> {
 
         Command::Reload => {
             send_command(MpvCommand::Quit)?;
-            println!("Stopped existing mpv instance...");
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            mpv::spawn()?;
-            println!("Started new mpv with updated configuration.");
+
+            if mpv::is_running() {
+                let start = std::time::Instant::now();
+                while mpv::is_running() && start.elapsed().as_secs() < 5 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+
+            std::thread::spawn(|| {
+                if let Err(e) = mpv::spawn() {
+                    eprintln!("Failed to spawn MPV: {}", e);
+                }
+            });
         }
 
         Command::Jump => {
-            let idx = jump()?;
-            send_command(MpvCommand::JumpTo { index: idx })?
+            if let Some(idx) = jump()? {
+                send_command(MpvCommand::JumpTo { index: idx })?
+            }
         }
 
         Command::Help => print_usage(),
