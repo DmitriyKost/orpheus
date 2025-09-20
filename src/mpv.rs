@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    io::{self, Write},
+    io::{self, BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::Path,
     process::Command,
@@ -19,7 +19,10 @@ pub enum MpvCommand {
     PlayFile { path: String },
     /// Quit mpv gracefully
     Quit,
-    // TODO more commands
+    /// Get the current queue
+    GetQueue,
+    /// Jump to a track in the playlist by index
+    JumpTo { index: usize },
 }
 
 impl fmt::Display for MpvCommand {
@@ -34,8 +37,10 @@ impl fmt::Display for MpvCommand {
             MpvCommand::PlayFile { path } => {
                 write!(f, r#""loadfile", "{}", "replace""#, path)
             }
-            MpvCommand::Quit => {
-                write!(f, r#""quit""#)
+            MpvCommand::Quit => write!(f, r#""quit""#),
+            MpvCommand::GetQueue => write!(f, r#""get_property", "playlist""#),
+            MpvCommand::JumpTo { index } => {
+                write!(f, r#""set_property", "playlist-pos", {}"#, index)
             }
         }
     }
@@ -105,4 +110,45 @@ pub fn send_command(cmd: MpvCommand) -> io::Result<()> {
     stream.flush()?;
 
     Ok(())
+}
+
+pub fn get_queue() -> io::Result<Vec<String>> {
+    let config = CONFIG.get().expect("config not initialized");
+    let mut stream = UnixStream::connect(&config.socket_path)?;
+
+    let cmd = mpv_json_command(MpvCommand::GetQueue);
+    stream.write_all(cmd.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+
+    loop {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        response.push_str(&line);
+        if line.contains(r#""error":"success""#) {
+            break;
+        }
+    }
+
+    let mut queue = Vec::new();
+    let mut start = 0;
+    while let Some(pos) = response[start..].find(r#""filename":"#) {
+        let pos = start + pos;
+        let rest = &response[pos + 12..];
+        if let Some(end) = rest.find('"') {
+            let filename = rest[..end].to_string();
+            queue.push(filename);
+            start = pos + 12 + end;
+        } else {
+            break;
+        }
+    }
+
+    Ok(queue)
 }

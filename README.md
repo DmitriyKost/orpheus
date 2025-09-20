@@ -33,7 +33,7 @@ Before using Orpheus, ensure you have the following installed:
 Clone the repository and build with Rust:
 
 ```bash
-git clone https://github.com/yourusername/orpheus.git
+git clone https://github.com/DmitriyKost/orpheus.git
 cd orpheus
 cargo build --release
 ```
@@ -86,6 +86,7 @@ Commands:
     play            Select and play a track or playlist
     append          Append tracks to queue
     reload          Reload mpv with updated configuration
+    jump            Jumps to a track in current queue
     help            Prints this cheatsheet
 ```
 

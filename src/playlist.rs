@@ -3,6 +3,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use crate::config::CONFIG;
+use crate::mpv::get_queue;
 use crate::ui::run_fzf;
 
 fn get_orpheus_dir() -> PathBuf {
@@ -134,7 +135,7 @@ pub fn delete_playlists() -> io::Result<()> {
     Ok(())
 }
 
-pub fn scan_music() -> std::io::Result<Vec<PathBuf>> {
+pub fn scan_music() -> io::Result<Vec<PathBuf>> {
     let config = CONFIG.get().expect("config not initialized");
     let music_dir = &config.music_dir;
 
@@ -152,4 +153,31 @@ pub fn scan_music() -> std::io::Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+pub fn jump() -> io::Result<usize> {
+    let queue = get_queue()?;
+
+    if queue.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::Other, "queue is empty"));
+    }
+
+    let selected = run_fzf(
+        &queue.iter().map(|s| PathBuf::from(s)).collect::<Vec<_>>(),
+        false,
+    )?;
+
+    if selected.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::Other, "nothing's selected"));
+    }
+
+    let chosen_filename = selected[0].to_string_lossy().to_string();
+    if let Some(index) = queue.iter().position(|f| *f == chosen_filename) {
+        Ok(index)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("failed to find the index of {}", chosen_filename),
+        ))
+    }
 }

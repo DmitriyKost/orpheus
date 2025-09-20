@@ -8,7 +8,7 @@ use playlist::{edit_playlist, list_playlists, scan_music};
 use std::{env, path::PathBuf};
 use ui::run_fzf;
 
-use crate::playlist::{create_playlist, delete_playlists};
+use crate::playlist::{create_playlist, delete_playlists, jump};
 
 fn print_usage() {
     println!(
@@ -19,8 +19,11 @@ fn print_usage() {
         \tedit\t\t\tEdit a playlist\n\
         \tdelete\t\t\tDelete playlists\n\
         \tplay\t\t\tSelect and play a track or playlist\n\
-        \tappend\t\t\tAppend tracks to queue
-        \thelp\t\t\tPrints this cheatsheet"
+        \tappend\t\t\tAppend tracks to queue\n\
+        \treload\t\t\tReload mpv with updated configuration\n\
+        \tjump\t\t\tJumps to a track in current queue\n\
+        \thelp\t\t\tPrints this cheatsheet\n\
+        "
     );
 }
 
@@ -119,6 +122,11 @@ fn main() -> std::io::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(300));
             mpv::spawn()?;
             println!("Started new mpv with updated configuration.");
+        }
+
+        "jump" => {
+            let idx = jump()?;
+            send_command(MpvCommand::JumpTo { index: idx })?
         }
 
         "help" => {
