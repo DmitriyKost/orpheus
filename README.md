@@ -93,6 +93,18 @@ Commands:
 
 ## Notes
 
+* Uses `fzf` for interactive selection.
 * Tracks starting with `#` in playlists are ignored as comments.
-* MPRIS integration requires the mpv MPRIS plugin.
+* MPRIS integration is optional; only loaded if the plugin path exists.
 * The `reload` command gracefully stops the current mpv instance and restarts it with the latest configuration.
+* **Playlists are stored under your XDG data directory:**
+
+```
+$XDG_DATA_HOME/orpheus/*.m3u
+```
+
+* If `$XDG_DATA_HOME` is not set, defaults to:
+
+```
+$HOME/.local/share/orpheus/*.m3u
+```
