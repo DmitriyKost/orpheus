@@ -92,6 +92,7 @@ pub fn spawn() -> io::Result<()> {
         .arg("--af=dynaudnorm=f=75:g=25:p=0.55")
         .arg("--force-window=no")
         .arg("--really-quiet")
+        .arg("--no-terminal")
         .arg(format!(
             "--input-ipc-server={}",
             config.socket_path.to_str().expect("invalid socket_path")

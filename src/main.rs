@@ -94,11 +94,9 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    std::thread::spawn(|| {
-        if let Err(e) = mpv::spawn() {
-            eprintln!("Failed to spawn MPV: {}", e);
-        }
-    });
+    if !mpv::is_running() {
+        mpv::spawn()?;
+    }
 
     let command = match Command::parse(&args) {
         Some(cmd) => cmd,
@@ -188,12 +186,7 @@ fn main() -> std::io::Result<()> {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             }
-
-            std::thread::spawn(|| {
-                if let Err(e) = mpv::spawn() {
-                    eprintln!("Failed to spawn MPV: {}", e);
-                }
-            });
+            mpv::spawn()?
         }
 
         Command::Jump => {
