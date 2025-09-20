@@ -10,6 +10,44 @@ use ui::run_fzf;
 
 use crate::playlist::{create_playlist, delete_playlists, jump};
 
+#[derive(Debug)]
+enum Command {
+    List,
+    Create { name: String },
+    Edit,
+    Delete,
+    Play,
+    Append,
+    Reload,
+    Jump,
+    Help,
+}
+
+impl Command {
+    fn all() -> &'static [&'static str] {
+        &[
+            "list", "create", "edit", "delete", "play", "append", "reload", "jump", "help",
+        ]
+    }
+
+    fn parse(args: &[String]) -> Option<Command> {
+        match args.get(0).map(|s| s.as_str()) {
+            Some("list") => Some(Command::List),
+            Some("create") => args
+                .get(1)
+                .map(|name| Command::Create { name: name.clone() }),
+            Some("edit") => Some(Command::Edit),
+            Some("delete") => Some(Command::Delete),
+            Some("play") => Some(Command::Play),
+            Some("append") => Some(Command::Append),
+            Some("reload") => Some(Command::Reload),
+            Some("jump") => Some(Command::Jump),
+            Some("help") => Some(Command::Help),
+            _ => None,
+        }
+    }
+}
+
 fn print_usage() {
     println!(
         "Usage: orpheus <command> [args]\n\n\
@@ -22,9 +60,20 @@ fn print_usage() {
         \tappend\t\t\tAppend tracks to queue\n\
         \treload\t\t\tReload mpv with updated configuration\n\
         \tjump\t\t\tJumps to a track in current queue\n\
-        \thelp\t\t\tPrints this cheatsheet\n\
-        "
+        \thelp\t\t\tPrints this cheatsheet\n"
     );
+}
+
+fn print_completions(words: &[String]) -> std::io::Result<()> {
+    match words.len() {
+        0 | 1 => {
+            for cmd in Command::all() {
+                println!("{}", cmd);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn main() -> std::io::Result<()> {
@@ -33,17 +82,31 @@ fn main() -> std::io::Result<()> {
         .set(config)
         .expect("Config already initialized");
 
-    mpv::spawn()?;
+    let args: Vec<String> = env::args().skip(1).collect();
 
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 {
+    if args.is_empty() {
         print_usage();
         return Ok(());
     }
 
-    match args[1].as_str() {
-        "list" => {
+    if args[0] == "--complete" {
+        print_completions(&args[1..])?;
+        return Ok(());
+    }
+
+    mpv::spawn()?;
+
+    let command = match Command::parse(&args) {
+        Some(cmd) => cmd,
+        None => {
+            eprintln!("Unknown command or missing arguments.");
+            print_usage();
+            return Ok(());
+        }
+    };
+
+    match command {
+        Command::List => {
             let playlists = list_playlists()?;
             println!("Playlists:");
             for p in playlists {
@@ -51,16 +114,13 @@ fn main() -> std::io::Result<()> {
             }
         }
 
-        "create" => {
-            let name = args.get(2).expect("Please provide a playlist name");
-            create_playlist(&name)?
-        }
+        Command::Create { name } => create_playlist(&name)?,
 
-        "edit" => edit_playlist()?,
+        Command::Edit => edit_playlist()?,
 
-        "delete" => delete_playlists()?,
+        Command::Delete => delete_playlists()?,
 
-        "play" => {
+        Command::Play => {
             let options = vec!["playlist", "single file"];
             let choice = run_fzf(
                 &options.iter().map(|s| PathBuf::from(s)).collect::<Vec<_>>(),
@@ -86,7 +146,7 @@ fn main() -> std::io::Result<()> {
                 }
                 "single file" => {
                     let files = scan_music()?;
-                    let selected = run_fzf(&files, true)?;
+                    let selected = run_fzf(&files, false)?;
                     if selected.is_empty() {
                         println!("No file selected.");
                         return Ok(());
@@ -101,14 +161,13 @@ fn main() -> std::io::Result<()> {
             }
         }
 
-        "append" => {
+        Command::Append => {
             let files = scan_music()?;
             let selected = run_fzf(&files, true)?;
             if selected.is_empty() {
                 println!("No file selected.");
                 return Ok(());
             }
-
             for file in &selected {
                 send_command(MpvCommand::AppendFile {
                     path: file.to_string_lossy().into(),
@@ -116,7 +175,7 @@ fn main() -> std::io::Result<()> {
             }
         }
 
-        "reload" => {
+        Command::Reload => {
             send_command(MpvCommand::Quit)?;
             println!("Stopped existing mpv instance...");
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -124,19 +183,12 @@ fn main() -> std::io::Result<()> {
             println!("Started new mpv with updated configuration.");
         }
 
-        "jump" => {
+        Command::Jump => {
             let idx = jump()?;
             send_command(MpvCommand::JumpTo { index: idx })?
         }
 
-        "help" => {
-            print_usage();
-        }
-
-        _ => {
-            eprintln!("Unknown command: {}", args[1]);
-            print_usage();
-        }
+        Command::Help => print_usage(),
     }
 
     Ok(())

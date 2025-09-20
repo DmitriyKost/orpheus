@@ -1,0 +1,27 @@
+#compdef orpheus
+
+# Zsh completion for Orpheus CLI
+_orpheus() {
+    local -a completions
+    local -a words
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    _arguments '*: :->args'
+
+    if (( CURRENT > 1 )); then
+        words=("${words[@]}" "${(@)words[2,CURRENT-1]}")
+    else
+        words=()
+    fi
+
+    # Call the orpheus CLI with --complete and current words
+    completions=("${(@f)$(orpheus --complete "${words[@]}")}")
+
+    # Feed completions to Zsh
+    if [[ -n $completions ]]; then
+        compadd -a completions
+    fi
+}
+
+compdef _orpheus orpheus
