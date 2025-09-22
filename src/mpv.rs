@@ -23,6 +23,8 @@ pub enum MpvCommand {
     GetQueue,
     /// Jump to a track in the playlist by index
     JumpTo { index: usize },
+    /// Enable/disable queue shuffling
+    SetShuffle { enabled: bool },
 }
 
 impl fmt::Display for MpvCommand {
@@ -41,6 +43,13 @@ impl fmt::Display for MpvCommand {
             MpvCommand::GetQueue => write!(f, r#""get_property", "playlist""#),
             MpvCommand::JumpTo { index } => {
                 write!(f, r#""set_property", "playlist-pos", {}"#, index)
+            }
+            MpvCommand::SetShuffle { enabled } => {
+                if *enabled {
+                    write!(f, r#""playlist-shuffle""#)
+                } else {
+                    write!(f, r#""playlist-unshuffle""#)
+                }
             }
         }
     }
@@ -74,10 +83,6 @@ pub fn spawn() -> io::Result<()> {
 
     let mut cmd = Command::new("mpv");
 
-    if let Some(back) = &config.mpv_audio_backend {
-        cmd.arg("--ao=".to_owned() + back);
-    }
-
     if let Some(ref path) = config.mpris_plugin_path {
         if path.exists() {
             cmd.arg(format!(
@@ -89,7 +94,6 @@ pub fn spawn() -> io::Result<()> {
 
     cmd.arg("--idle=yes")
         .arg("--no-video")
-        .arg("--af=dynaudnorm=f=75:g=25:p=0.55")
         .arg("--force-window=no")
         .arg("--really-quiet")
         .arg("--no-terminal")

@@ -20,6 +20,7 @@ enum Command {
     Append,
     Reload,
     Jump,
+    Shuffle { enabled: bool },
     Help,
 }
 
@@ -43,6 +44,11 @@ impl Command {
             Some("reload") => Some(Command::Reload),
             Some("jump") => Some(Command::Jump),
             Some("help") => Some(Command::Help),
+            Some("shuffle") => args.get(1).map(|enabled| Command::Shuffle {
+                enabled: enabled.parse().expect(&format!(
+                    "wrong shuffle arg {enabled}\nUsage: orpheus shuffle <true|false>"
+                )),
+            }),
             _ => None,
         }
     }
@@ -60,6 +66,7 @@ fn print_usage() {
         \tappend\t\t\tAppend tracks to queue\n\
         \treload\t\t\tReload mpv with updated configuration\n\
         \tjump\t\t\tJumps to a track in current queue\n\
+        \tshuffle <true|false>\tEnables/disables queue shuffle (static)\n\
         \thelp\t\t\tPrints this cheatsheet\n"
     );
 }
@@ -194,6 +201,8 @@ fn main() -> std::io::Result<()> {
                 send_command(MpvCommand::JumpTo { index: idx })?
             }
         }
+
+        Command::Shuffle { enabled } => send_command(MpvCommand::SetShuffle { enabled })?,
 
         Command::Help => print_usage(),
     }

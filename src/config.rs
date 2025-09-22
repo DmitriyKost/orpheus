@@ -13,7 +13,6 @@ pub struct Config {
     pub socket_path: PathBuf,
     pub mpris_plugin_path: Option<PathBuf>,
     pub music_dir: PathBuf,
-    pub mpv_audio_backend: Option<String>,
 }
 
 impl Config {
@@ -43,10 +42,6 @@ impl Config {
                 "# mpris_plugin_path=/usr/lib/mpv-mpris/mpris.so # Optional plugin - allows to use media keys"
             )?;
             writeln!(file, "# music_dir=$HOME/Music")?;
-            writeln!(
-                file,
-                "# mpv_audio_backend=pulse # Optional arg for mpv --ao=[]"
-            )?;
         }
 
         let mut config_map = HashMap::new();
@@ -61,8 +56,6 @@ impl Config {
                 }
             }
         }
-
-        let mpv_audio_backend = config_map.get("mpv_audio_backend").map(|v| v.clone());
 
         let socket_path = config_map
             .get("socket_path")
@@ -86,7 +79,6 @@ impl Config {
             socket_path,
             mpris_plugin_path,
             music_dir,
-            mpv_audio_backend,
         })
     }
 }
