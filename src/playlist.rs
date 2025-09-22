@@ -140,10 +140,18 @@ pub fn scan_music() -> io::Result<Vec<PathBuf>> {
     let music_dir = &config.music_dir;
 
     let mut files = Vec::new();
-    for entry in std::fs::read_dir(music_dir)? {
+    scan_dir(music_dir, &mut files)?;
+    Ok(files)
+}
+
+fn scan_dir(dir: &std::path::Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() {
+
+        if path.is_dir() {
+            scan_dir(&path, files)?;
+        } else if path.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 match ext.to_lowercase().as_str() {
                     "mp3" | "flac" | "ogg" | "wav" => files.push(path),
@@ -152,7 +160,7 @@ pub fn scan_music() -> io::Result<Vec<PathBuf>> {
             }
         }
     }
-    Ok(files)
+    Ok(())
 }
 
 pub fn jump() -> io::Result<Option<usize>> {
