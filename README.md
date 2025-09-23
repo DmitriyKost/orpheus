@@ -67,7 +67,6 @@ Example config:
 * `socket_path` – mpv IPC socket path
 * `mpris_plugin_path` – path to mpv MPRIS plugin
 * `music_dir` – default music directory
-* `mpv_audio_backend` – optional audio backend for mpv (`pulse`, `alsa`, etc.)
 
 **Note:** The config file is auto-created on first run if missing. Environment variables like `$HOME` are expanded automatically.
 
