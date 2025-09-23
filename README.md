@@ -61,7 +61,6 @@ Example config:
 # socket_path=/tmp/mpv-socket
 # mpris_plugin_path=/usr/lib/mpv-mpris/mpris.so
 # music_dir=$HOME/Music
-# mpv_audio_backend=pulse # Optional arg for mpv --ao=[]
 ```
 
 * `socket_path` – mpv IPC socket path
