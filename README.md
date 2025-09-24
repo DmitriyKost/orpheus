@@ -11,7 +11,6 @@
 * Append tracks to the current queue
 * Reload mpv with updated configuration (`reload` command)
 * Fuzzy search for tracks and playlists using `fzf`
-* Configurable mpv audio backend (`--ao`)
 * Optional MPRIS plugin support
 
 ---
