@@ -492,7 +492,11 @@ impl App {
                     return Ok(());
                 };
                 self.queue = self.filtered.iter().skip(selected).copied().collect();
-                self.queue_state.select(Some(0));
+                self.current_queue_pos = if self.queue.is_empty() { None } else { Some(0) };
+                self.search.clear();
+                self.mode = Mode::Normal;
+                self.reset_filters();
+                self.queue_state.select(if self.queue.is_empty() { None } else { Some(0) });
                 self.play_queue_pos(0)?;
                 Ok(())
             }

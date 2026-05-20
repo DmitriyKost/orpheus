@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "orpheus", version, about = "Small native terminal music player")]
@@ -28,6 +28,11 @@ pub enum Command {
     },
     /// Stop all background Orpheus playback processes.
     Stop,
+    /// Generate shell completion script.
+    Completion {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     #[command(hide = true)]
     PlayInternal,
     /// Manage m3u playlists stored by Orpheus.
@@ -35,6 +40,15 @@ pub enum Command {
         #[command(subcommand)]
         command: PlaylistCommand,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Shell {
+    Bash,
+    Elvish,
+    Fish,
+    PowerShell,
+    Zsh,
 }
 
 #[derive(Debug, Subcommand)]

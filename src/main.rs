@@ -9,10 +9,11 @@ mod process;
 mod tui;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::{Generator, Shell as ClapShell, generate};
 use crate::{
     audio::{duration, NativePlayer},
-    cli::{Cli, Command, PlaylistCommand},
+    cli::{Cli, Command, PlaylistCommand, Shell},
     config::Config,
     library::{Library, Track},
     media::MediaSession,
@@ -53,6 +54,9 @@ fn main() -> Result<()> {
             let killed = process::stop_background_players(&config.data_dir)?;
             println!("stopped {killed} background process(es)");
         }
+        Command::Completion { shell } => {
+            print_completion(shell);
+        }
         Command::PlayInternal { .. } => {
             daemon::run(config, library, playlists)?;
         }
@@ -83,6 +87,21 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_completion(shell: Shell) {
+    let mut cmd = Cli::command();
+    match shell {
+        Shell::Bash => generate_for(ClapShell::Bash, &mut cmd),
+        Shell::Elvish => generate_for(ClapShell::Elvish, &mut cmd),
+        Shell::Fish => generate_for(ClapShell::Fish, &mut cmd),
+        Shell::PowerShell => generate_for(ClapShell::PowerShell, &mut cmd),
+        Shell::Zsh => generate_for(ClapShell::Zsh, &mut cmd),
+    }
+}
+
+fn generate_for<G: Generator>(generator: G, cmd: &mut clap::Command) {
+    generate(generator, cmd, cmd.get_name().to_string(), &mut std::io::stdout());
 }
 
 fn play_tracks(tracks: Vec<Track>) -> Result<()> {
