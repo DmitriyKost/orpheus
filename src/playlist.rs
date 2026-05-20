@@ -1,191 +1,88 @@
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Write};
-use std::path::PathBuf;
+use anyhow::{Context, Result};
+use std::{fs, io::Write, path::PathBuf};
 
-use crate::config::CONFIG;
-use crate::mpv::get_queue;
-use crate::ui::run_fzf;
-
-fn get_orpheus_dir() -> PathBuf {
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").expect("HOME env var not set");
-            PathBuf::from(home).join(".local/share")
-        });
-    let orpheus_dir = data_dir.join("orpheus");
-    fs::create_dir_all(&orpheus_dir).unwrap();
-    orpheus_dir
+#[derive(Debug, Clone)]
+pub struct PlaylistSummary {
+    pub name: String,
 }
 
-pub fn list_playlists() -> io::Result<Vec<PathBuf>> {
-    let orpheus_dir = get_orpheus_dir();
-    let mut playlists = Vec::new();
-    for entry in fs::read_dir(&orpheus_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |e| e == "m3u") {
-            playlists.push(path);
+#[derive(Debug, Clone)]
+pub struct PlaylistStore {
+    dir: PathBuf,
+}
+
+impl PlaylistStore {
+    pub fn new(data_dir: PathBuf) -> Result<Self> {
+        let dir = data_dir.join("playlists");
+        fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
+    }
+
+    pub fn list(&self) -> Result<Vec<PlaylistSummary>> {
+        let mut playlists = Vec::new();
+        for entry in fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("m3u") {
+                let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue; };
+                playlists.push(PlaylistSummary { name: name.to_string() });
+            }
         }
-    }
-    Ok(playlists)
-}
-
-pub fn create_playlist(name: &str) -> io::Result<()> {
-    let files = scan_music()?;
-    let selected = run_fzf(&files, true)?;
-    let path = write_playlist(name, &selected)?;
-    println!("Created playlist at {}", path.display());
-    Ok(())
-}
-
-fn write_playlist(name: &str, files: &[PathBuf]) -> io::Result<PathBuf> {
-    let playlist_path = get_orpheus_dir().join(format!("{}.m3u", name));
-    let mut file = File::create(&playlist_path)?;
-
-    writeln!(file, "#EXTM3U")?;
-    for f in files {
-        writeln!(file, "{}", f.display())?;
+        playlists.sort_by_key(|p| p.name.to_lowercase());
+        Ok(playlists)
     }
 
-    Ok(playlist_path)
-}
-
-pub fn edit_playlist() -> io::Result<()> {
-    let playlists = list_playlists()?;
-    if playlists.is_empty() {
-        eprintln!("No playlists available.");
-        return Ok(());
+    pub fn create(&self, name: &str) -> Result<()> {
+        let path = self.path_for(name);
+        if path.exists() {
+            anyhow::bail!("playlist already exists: {name}");
+        }
+        let mut file = fs::File::create(path)?;
+        writeln!(file, "#EXTM3U")?;
+        Ok(())
     }
 
-    let selected_playlist = run_fzf(&playlists, false)?;
-    if selected_playlist.is_empty() {
-        return Ok(());
-    }
-    let playlist_path = &selected_playlist[0];
-    let playlist_name = playlist_path.file_stem().unwrap().to_string_lossy();
-
-    let actions = vec!["delete", "append"];
-    let action_selected = run_fzf(
-        &actions.iter().map(|s| PathBuf::from(s)).collect::<Vec<_>>(),
-        false,
-    )?;
-    if action_selected.is_empty() {
-        return Ok(());
+    pub fn delete(&self, name: &str) -> Result<()> {
+        fs::remove_file(self.path_for(name)).with_context(|| format!("failed to delete playlist {name}"))
     }
 
-    let mut playlist_tracks: Vec<PathBuf> = {
-        let file = File::open(playlist_path)?;
-        BufReader::new(file)
+    pub fn read(&self, name: &str) -> Result<Vec<PathBuf>> {
+        let path = self.path_for(name);
+        let content = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        Ok(content
             .lines()
-            .filter_map(|l| l.ok())
-            .filter(|l| !l.starts_with('#'))
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .map(PathBuf::from)
-            .collect()
-    };
+            .collect())
+    }
 
-    match action_selected[0].to_string_lossy().as_ref() {
-        "delete" => {
-            let to_delete = run_fzf(&playlist_tracks, true)?;
-            playlist_tracks.retain(|f| !to_delete.contains(f));
-            println!("Deleted {} track(s).", to_delete.len());
+    pub fn append(&self, name: &str, files: &[PathBuf]) -> Result<()> {
+        let path = self.path_for(name);
+        if !path.exists() {
+            self.create(name)?;
         }
+        let mut existing = self.read(name)?;
+        existing.extend(files.iter().cloned());
+        self.write(name, &existing)
+    }
 
-        "append" => {
-            let music_files = scan_music()?;
-            let to_append_candidates: Vec<_> = music_files
-                .into_iter()
-                .filter(|f| !playlist_tracks.contains(f))
-                .collect();
-
-            if to_append_candidates.is_empty() {
-                println!("No new tracks available to append.");
-            } else {
-                let to_append = run_fzf(&to_append_candidates, true)?;
-                playlist_tracks.extend(to_append);
-                println!("Appended {} track(s).", playlist_tracks.len());
-            }
+    pub fn write(&self, name: &str, files: &[PathBuf]) -> Result<()> {
+        let mut out = String::from("#EXTM3U\n");
+        for file in files {
+            out.push_str(&file.to_string_lossy());
+            out.push('\n');
         }
-
-        _ => {}
+        fs::write(self.path_for(name), out)?;
+        Ok(())
     }
 
-    write_playlist(&playlist_name, &playlist_tracks)?;
-    Ok(())
-}
-
-pub fn delete_playlists() -> io::Result<()> {
-    let playlists = list_playlists()?;
-    if playlists.is_empty() {
-        eprintln!("No playlists available to delete.");
-        return Ok(());
+    pub fn file_path(&self, name: &str) -> PathBuf {
+        self.path_for(name)
     }
 
-    let selected = run_fzf(&playlists, true)?;
-    if selected.is_empty() {
-        return Ok(());
-    }
-
-    for playlist_path in &selected {
-        if let Err(e) = fs::remove_file(playlist_path) {
-            eprintln!("Failed to delete {}: {}", playlist_path.display(), e);
-        }
-    }
-
-    Ok(())
-}
-
-pub fn scan_music() -> io::Result<Vec<PathBuf>> {
-    let config = CONFIG.get().expect("config not initialized");
-    let music_dir = &config.music_dir;
-
-    let mut files = Vec::new();
-    scan_dir(music_dir, &mut files)?;
-    Ok(files)
-}
-
-fn scan_dir(dir: &std::path::Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            scan_dir(&path, files)?;
-        } else if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                match ext.to_lowercase().as_str() {
-                    "mp3" | "flac" | "ogg" | "wav" => files.push(path),
-                    _ => {}
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn jump() -> io::Result<Option<usize>> {
-    let queue = get_queue()?;
-
-    if queue.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::Other, "queue is empty"));
-    }
-
-    let selected = run_fzf(
-        &queue.iter().map(|s| PathBuf::from(s)).collect::<Vec<_>>(),
-        false,
-    )?;
-
-    if selected.is_empty() {
-        return Ok(None);
-    }
-
-    let chosen_filename = selected[0].to_string_lossy().to_string();
-    if let Some(index) = queue.iter().position(|f| *f == chosen_filename) {
-        Ok(Some(index))
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("failed to find the index of {}", chosen_filename),
-        ))
+    fn path_for(&self, name: &str) -> PathBuf {
+        let safe = name.trim().trim_end_matches(".m3u");
+        self.dir.join(format!("{safe}.m3u"))
     }
 }

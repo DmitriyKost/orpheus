@@ -1,122 +1,62 @@
-use std::collections::HashMap;
-use std::env;
-use std::fs::{self, File};
-use std::io::{self, Write};
-use std::path::PathBuf;
+use anyhow::{Context, Result};
+use std::{env, fs, path::PathBuf};
 
-use std::sync::OnceLock;
-
-pub static CONFIG: OnceLock<Config> = OnceLock::new();
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
-    pub socket_path: PathBuf,
-    pub mpris_plugin_path: Option<PathBuf>,
     pub music_dir: PathBuf,
+    pub data_dir: PathBuf,
 }
 
 impl Config {
-    pub fn load() -> io::Result<Self> {
-        let home_dir = env::var("HOME")
+    pub fn load(music_dir_override: Option<PathBuf>) -> Result<Self> {
+        let home = env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?;
+        let config_root = env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let default_socket = PathBuf::from("/tmp/mpv-socket");
-        let default_music = home_dir.join("Music");
+            .unwrap_or_else(|| home.join(".config"));
+        let data_root = env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"));
 
-        let xdg_config = env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir.join(".config"));
-        let config_dir = xdg_config.join("orpheus");
+        let config_dir = config_root.join("orpheus");
+        let data_dir = data_root.join("orpheus");
+        fs::create_dir_all(&config_dir)?;
+        fs::create_dir_all(&data_dir)?;
+
         let config_path = config_dir.join("config.conf");
-
-        if !config_dir.exists() {
-            fs::create_dir_all(&config_dir)?;
-        }
-
         if !config_path.exists() {
-            let mut file = File::create(&config_path)?;
-            writeln!(file, "# Orpheus configuration file")?;
-            writeln!(file, "# socket_path=/tmp/mpv-socket")?;
-            writeln!(
-                file,
-                "# mpris_plugin_path=/usr/lib/mpv-mpris/mpris.so # Optional plugin - allows to use media keys"
-            )?;
-            writeln!(file, "# music_dir=$HOME/Music")?;
+            fs::write(&config_path, "# Orpheus configuration\n# music_dir=$HOME/Music\n")?;
         }
 
-        let mut config_map = HashMap::new();
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((key, value)) = line.split_once('=') {
-                    config_map.insert(key.trim().to_string(), value.trim().to_string());
-                }
-            }
-        }
+        let configured_music_dir = read_music_dir(&config_path, &home)?.unwrap_or_else(|| home.join("Music"));
+        let music_dir = music_dir_override.unwrap_or(configured_music_dir);
 
-        let socket_path = config_map
-            .get("socket_path")
-            .map(|v| expand_env_vars(v))
-            .unwrap_or(default_socket);
-
-        let music_dir = config_map
-            .get("music_dir")
-            .map(|v| expand_env_vars(v))
-            .unwrap_or(default_music);
-
-        let mpris_plugin_path = config_map
-            .get("mpris_plugin_path")
-            .map(|v| expand_env_vars(v))
-            .and_then(|p| {
-                let path = PathBuf::from(p);
-                if path.exists() { Some(path) } else { None }
-            });
-
-        Ok(Self {
-            socket_path,
-            mpris_plugin_path,
-            music_dir,
-        })
+        Ok(Self { music_dir, data_dir })
     }
 }
 
-fn expand_env_vars(path: &str) -> PathBuf {
-    let mut result = String::new();
-    let mut chars = path.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '$' {
-            let mut var_name = String::new();
-            if let Some(&next) = chars.peek() {
-                if next == '{' {
-                    chars.next();
-                    while let Some(&ch) = chars.peek() {
-                        if ch == '}' {
-                            chars.next();
-                            break;
-                        }
-                        var_name.push(ch);
-                        chars.next();
-                    }
-                } else {
-                    while let Some(&ch) = chars.peek() {
-                        if !ch.is_alphanumeric() && ch != '_' {
-                            break;
-                        }
-                        var_name.push(ch);
-                        chars.next();
-                    }
-                }
-            }
-            let value = env::var(&var_name).unwrap_or_default();
-            result.push_str(&value);
-        } else {
-            result.push(c);
+fn read_music_dir(path: &PathBuf, home: &PathBuf) -> Result<Option<PathBuf>> {
+    let content = fs::read_to_string(path)?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(("music_dir", value)) = line.split_once('=').map(|(k, v)| (k.trim(), v.trim())) {
+            return Ok(Some(expand_home(value, home)));
         }
     }
+    Ok(None)
+}
 
-    PathBuf::from(result)
+fn expand_home(value: &str, home: &PathBuf) -> PathBuf {
+    if value == "$HOME" {
+        return home.clone();
+    }
+    if let Some(rest) = value.strip_prefix("$HOME/") {
+        return home.join(rest);
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    PathBuf::from(value)
 }

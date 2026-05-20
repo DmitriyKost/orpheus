@@ -1,211 +1,130 @@
+mod audio;
+mod cli;
 mod config;
-mod mpv;
+mod daemon;
+mod library;
+mod media;
 mod playlist;
-mod ui;
+mod process;
+mod tui;
 
-use mpv::*;
-use playlist::{edit_playlist, list_playlists, scan_music};
-use std::{env, path::PathBuf};
-use ui::run_fzf;
+use anyhow::Result;
+use clap::Parser;
+use crate::{
+    audio::{duration, NativePlayer},
+    cli::{Cli, Command, PlaylistCommand},
+    config::Config,
+    library::{Library, Track},
+    media::MediaSession,
+    playlist::PlaylistStore,
+};
 
-use crate::playlist::{create_playlist, delete_playlists, jump};
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let config = Config::load(cli.music_dir.clone())?;
+    let library = Library::new(config.music_dir.clone());
+    let playlists = PlaylistStore::new(config.data_dir.clone())?;
 
-#[derive(Debug)]
-enum Command {
-    List,
-    Create { name: String },
-    Edit,
-    Delete,
-    Play,
-    Append,
-    Reload,
-    Jump,
-    Shuffle { enabled: bool },
-    Help,
-}
-
-impl Command {
-    fn all() -> &'static [&'static str] {
-        &[
-            "list", "create", "edit", "delete", "play", "append", "reload", "jump", "help",
-        ]
-    }
-
-    fn parse(args: &[String]) -> Option<Command> {
-        match args.get(0).map(|s| s.as_str()) {
-            Some("list") => Some(Command::List),
-            Some("create") => args
-                .get(1)
-                .map(|name| Command::Create { name: name.clone() }),
-            Some("edit") => Some(Command::Edit),
-            Some("delete") => Some(Command::Delete),
-            Some("play") => Some(Command::Play),
-            Some("append") => Some(Command::Append),
-            Some("reload") => Some(Command::Reload),
-            Some("jump") => Some(Command::Jump),
-            Some("help") => Some(Command::Help),
-            Some("shuffle") => args.get(1).map(|enabled| Command::Shuffle {
-                enabled: enabled.parse().expect(&format!(
-                    "wrong shuffle arg {enabled}\nUsage: orpheus shuffle <true|false>"
-                )),
-            }),
-            _ => None,
+    match cli.command.unwrap_or(Command::Tui) {
+        Command::Tui => {
+            let tracks = library.scan()?;
+            tui::run(config, tracks, playlists)?;
         }
-    }
-}
-
-fn print_usage() {
-    println!(
-        "Usage: orpheus <command> [args]\n\n\
-        Commands:\n\
-        \tlist\t\t\tList all playlists\n\
-        \tcreate <name>\t\tCreate a new playlist\n\
-        \tedit\t\t\tEdit a playlist\n\
-        \tdelete\t\t\tDelete playlists\n\
-        \tplay\t\t\tSelect and play a track or playlist\n\
-        \tappend\t\t\tAppend tracks to queue\n\
-        \treload\t\t\tReload mpv with updated configuration\n\
-        \tjump\t\t\tJumps to a track in current queue\n\
-        \tshuffle <true|false>\tEnables/disables queue shuffle (static)\n\
-        \thelp\t\t\tPrints this cheatsheet\n"
-    );
-}
-
-fn print_completions(words: &[String]) -> std::io::Result<()> {
-    match words.len() {
-        0 | 1 => {
-            for cmd in Command::all() {
-                println!("{}", cmd);
+        Command::Scan => {
+            for track in library.scan()? {
+                println!("{}", track.path.display());
             }
         }
-        _ => {}
+        Command::Play { input, background } => {
+            let inputs = input.into_iter().collect::<Vec<_>>();
+            if background {
+                let started = process::ensure_daemon_and_send_replace(&config.data_dir, &inputs)?;
+                if started {
+                    println!("started background playback process");
+                } else {
+                    println!("updated running background playback");
+                }
+            } else {
+                let tracks = resolve_inputs(&library, &playlists, &inputs)?;
+                play_tracks(tracks)?;
+            }
+        }
+        Command::Stop => {
+            let killed = process::stop_background_players(&config.data_dir)?;
+            println!("stopped {killed} background process(es)");
+        }
+        Command::PlayInternal { .. } => {
+            daemon::run(config, library, playlists)?;
+        }
+        Command::Playlist { command } => match command {
+            PlaylistCommand::List => {
+                for playlist in playlists.list()? {
+                    println!("{}", playlist.name);
+                }
+            }
+            PlaylistCommand::Show { name } => {
+                for track in playlists.read(&name)? {
+                    println!("{}", track.display());
+                }
+            }
+            PlaylistCommand::Create { name } => {
+                playlists.create(&name)?;
+                println!("created playlist {name}");
+            }
+            PlaylistCommand::Delete { name } => {
+                playlists.delete(&name)?;
+                println!("deleted playlist {name}");
+            }
+            PlaylistCommand::Add { name, files } => {
+                playlists.append(&name, &files)?;
+                println!("added {} file(s) to {name}", files.len());
+            }
+        },
     }
+
     Ok(())
 }
 
-fn main() -> std::io::Result<()> {
-    let config = config::Config::load()?;
-    config::CONFIG
-        .set(config)
-        .expect("Config already initialized");
-
-    let args: Vec<String> = env::args().skip(1).collect();
-
-    if args.is_empty() {
-        print_usage();
-        return Ok(());
+fn play_tracks(tracks: Vec<Track>) -> Result<()> {
+    if tracks.is_empty() {
+        anyhow::bail!("nothing to play");
     }
 
-    if args[0] == "--complete" {
-        print_completions(&args[1..])?;
-        return Ok(());
+    let mut player = NativePlayer::new()?;
+    let mut media = MediaSession::new();
+
+    for track in tracks {
+        println!("Playing {}", track.display_name());
+        media.track_started(&track, duration(&track.path));
+        player.play(&track.path)?;
+        player.sleep_until_end();
     }
 
-    if !mpv::is_running() {
-        mpv::spawn()?;
-    }
-
-    let command = match Command::parse(&args) {
-        Some(cmd) => cmd,
-        None => {
-            eprintln!("Unknown command or missing arguments.");
-            print_usage();
-            return Ok(());
-        }
-    };
-
-    match command {
-        Command::List => {
-            let playlists = list_playlists()?;
-            println!("Playlists:");
-            for p in playlists {
-                println!("{}", p.file_name().unwrap().to_string_lossy());
-            }
-        }
-
-        Command::Create { name } => create_playlist(&name)?,
-
-        Command::Edit => edit_playlist()?,
-
-        Command::Delete => delete_playlists()?,
-
-        Command::Play => {
-            let options = vec!["playlist", "single file"];
-            let choice = run_fzf(
-                &options.iter().map(|s| PathBuf::from(s)).collect::<Vec<_>>(),
-                false,
-            )?;
-            if choice.is_empty() {
-                println!("No choice selected.");
-                return Ok(());
-            }
-
-            match choice[0].to_string_lossy().as_ref() {
-                "playlist" => {
-                    let playlists = list_playlists()?;
-                    let selected = run_fzf(&playlists, false)?;
-                    if selected.is_empty() {
-                        println!("No playlist selected.");
-                        return Ok(());
-                    }
-                    let playlist_path = &selected[0];
-                    send_command(MpvCommand::LoadPlaylist {
-                        path: playlist_path.to_string_lossy().into(),
-                    })?;
-                }
-                "single file" => {
-                    let files = scan_music()?;
-                    let selected = run_fzf(&files, false)?;
-                    if selected.is_empty() {
-                        println!("No file selected.");
-                        return Ok(());
-                    }
-                    for file in &selected {
-                        send_command(MpvCommand::PlayFile {
-                            path: file.to_string_lossy().into(),
-                        })?;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        Command::Append => {
-            let files = scan_music()?;
-            let selected = run_fzf(&files, true)?;
-            if selected.is_empty() {
-                println!("No file selected.");
-                return Ok(());
-            }
-            for file in &selected {
-                send_command(MpvCommand::AppendFile {
-                    path: file.to_string_lossy().into(),
-                })?;
-            }
-        }
-
-        Command::Reload => {
-            send_command(MpvCommand::Quit)?;
-
-            if mpv::is_running() {
-                let start = std::time::Instant::now();
-                while mpv::is_running() && start.elapsed().as_secs() < 5 {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            }
-            mpv::spawn()?
-        }
-
-        Command::Jump => {
-            if let Some(idx) = jump()? {
-                send_command(MpvCommand::JumpTo { index: idx })?
-            }
-        }
-
-        Command::Shuffle { enabled } => send_command(MpvCommand::SetShuffle { enabled })?,
-
-        Command::Help => print_usage(),
-    }
-
+    media.finished();
     Ok(())
+}
+
+fn resolve_inputs(library: &Library, playlists: &PlaylistStore, inputs: &[String]) -> Result<Vec<library::Track>> {
+    if inputs.is_empty() {
+        return Ok(library.scan()?);
+    }
+
+    let mut tracks = Vec::new();
+    for input in inputs {
+        tracks.extend(resolve_one_input(playlists, input)?);
+    }
+    Ok(tracks)
+}
+
+fn resolve_one_input(playlists: &PlaylistStore, input: &str) -> Result<Vec<library::Track>> {
+    let input_path = std::path::PathBuf::from(input);
+    if input_path.exists() {
+        if input_path.is_dir() {
+            return Ok(Library::new(input_path).scan()?);
+        }
+        return Ok(vec![library::Track::from_path(input_path)]);
+    }
+
+    let playlist_tracks = playlists.read(input)?;
+    Ok(playlist_tracks.into_iter().map(library::Track::from_path).collect())
 }
