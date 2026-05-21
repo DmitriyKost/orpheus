@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::{
     fs,
+    io::ErrorKind,
     io::{BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
@@ -21,7 +22,22 @@ use crate::{
 pub fn run(config: Config, library: Library, playlists: PlaylistStore) -> Result<()> {
     let socket = crate::process::socket_path(&config.data_dir);
     if socket.exists() {
-        fs::remove_file(&socket)?;
+        match UnixStream::connect(&socket) {
+            Ok(_) => anyhow::bail!("daemon is already running"),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound
+                        | ErrorKind::ConnectionRefused
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::AddrNotAvailable
+                ) =>
+            {
+                fs::remove_file(&socket)?;
+            }
+            Err(error) => anyhow::bail!("cannot safely replace daemon socket: {error}"),
+        }
     }
     let listener = UnixListener::bind(&socket)?;
     let (request_tx, request_rx) = mpsc::channel::<DaemonRequest>();

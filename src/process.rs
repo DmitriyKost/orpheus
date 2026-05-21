@@ -142,7 +142,22 @@ fn spawn_daemon(data_dir: &Path) -> Result<()> {
     fs::create_dir_all(data_dir)?;
     let socket = socket_path(data_dir);
     if socket.exists() {
-        let _ = fs::remove_file(&socket);
+        match UnixStream::connect(&socket) {
+            Ok(_) => anyhow::bail!("daemon is already running"),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound
+                        | ErrorKind::ConnectionRefused
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::AddrNotAvailable
+                ) =>
+            {
+                let _ = fs::remove_file(&socket);
+            }
+            Err(error) => anyhow::bail!("cannot safely replace daemon socket: {error}"),
+        }
     }
     let exe = std::env::current_exe()?;
 
