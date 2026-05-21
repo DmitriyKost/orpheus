@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Write},
+    io::ErrorKind,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -50,17 +51,45 @@ pub fn write_snapshot(data_dir: &Path, snapshot: &DaemonSnapshot) -> Result<()> 
 }
 
 pub fn send_command(data_dir: &Path, command: &DaemonCommand) -> Result<()> {
-    let mut stream = UnixStream::connect(socket_path(data_dir)).context("daemon is not running")?;
-    let payload = serde_json::to_string(command)?;
-    stream.write_all(payload.as_bytes())?;
-    stream.write_all(b"\n")?;
+    send_command_internal(data_dir, command).map_err(|error| match error {
+        SendCommandError::Transport(message) => anyhow::anyhow!(message),
+        SendCommandError::Daemon(message) => anyhow::anyhow!(message),
+    })
+}
+
+enum SendCommandError {
+    Transport(String),
+    Daemon(String),
+}
+
+fn send_command_internal(data_dir: &Path, command: &DaemonCommand) -> std::result::Result<(), SendCommandError> {
+    let mut stream = UnixStream::connect(socket_path(data_dir)).map_err(|error| {
+        if matches!(
+            error.kind(),
+            ErrorKind::NotFound | ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset | ErrorKind::AddrNotAvailable
+        ) {
+            SendCommandError::Transport("daemon is not running".to_string())
+        } else {
+            SendCommandError::Transport(format!("daemon transport error: {error}"))
+        }
+    })?;
+    let payload = serde_json::to_string(command)
+        .map_err(|error| SendCommandError::Daemon(format!("failed to serialize command: {error}")))?;
+    stream
+        .write_all(payload.as_bytes())
+        .map_err(|error| SendCommandError::Transport(format!("failed to write command: {error}")))?;
+    stream
+        .write_all(b"\n")
+        .map_err(|error| SendCommandError::Transport(format!("failed to write command terminator: {error}")))?;
 
     let mut response = String::new();
-    stream.read_to_string(&mut response)?;
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| SendCommandError::Transport(format!("failed to read daemon response: {error}")))?;
     if response.trim() == "ok" {
         Ok(())
     } else {
-        anyhow::bail!(response.trim().to_string())
+        Err(SendCommandError::Daemon(response.trim().to_string()))
     }
 }
 
@@ -74,13 +103,18 @@ pub fn ensure_daemon_and_send_replace(data_dir: &Path, inputs: &[String]) -> Res
 }
 
 pub fn ensure_daemon_and_send_command(data_dir: &Path, command: &DaemonCommand) -> Result<bool> {
-    if send_command(data_dir, command).is_ok() {
-        return Ok(false);
+    match send_command_internal(data_dir, command) {
+        Ok(()) => return Ok(false),
+        Err(SendCommandError::Daemon(message)) => return Err(anyhow::anyhow!(message)),
+        Err(SendCommandError::Transport(_)) => {}
     }
 
     spawn_daemon(data_dir)?;
     wait_for_socket(data_dir)?;
-    send_command(data_dir, command)?;
+    send_command_internal(data_dir, command).map_err(|error| match error {
+        SendCommandError::Transport(message) => anyhow::anyhow!(message),
+        SendCommandError::Daemon(message) => anyhow::anyhow!(message),
+    })?;
     Ok(true)
 }
 
