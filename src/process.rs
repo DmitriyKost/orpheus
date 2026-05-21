@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    fs::File,
     io::{Read, Write},
     io::ErrorKind,
     os::unix::net::UnixStream,
@@ -46,7 +47,16 @@ pub fn read_snapshot(data_dir: &Path) -> Result<Option<DaemonSnapshot>> {
 pub fn write_snapshot(data_dir: &Path, snapshot: &DaemonSnapshot) -> Result<()> {
     let path = state_path(data_dir);
     let content = serde_json::to_string(snapshot)?;
-    fs::write(path, content)?;
+    let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+
+    let mut tmp = File::create(&tmp_path)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.sync_all()?;
+    fs::rename(&tmp_path, &path)?;
+
+    if let Ok(dir) = File::open(data_dir) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 
@@ -121,10 +131,14 @@ pub fn ensure_daemon_and_send_command(data_dir: &Path, command: &DaemonCommand) 
 pub fn wait_for_current_index(data_dir: &Path, expected: usize, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if let Some(snapshot) = read_snapshot(data_dir)? {
-            if snapshot.current == Some(expected) {
-                return Ok(());
+        match read_snapshot(data_dir) {
+            Ok(Some(snapshot)) => {
+                if snapshot.current == Some(expected) {
+                    return Ok(());
+                }
             }
+            Ok(None) => {}
+            Err(_) => {}
         }
         thread::sleep(Duration::from_millis(50));
     }

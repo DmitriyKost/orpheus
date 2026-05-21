@@ -116,21 +116,15 @@ impl MediaSession {
         }
     }
 
-    pub fn poll_events(&mut self) -> Vec<MediaControlAction> {
+    pub fn take_events_rx(&mut self) -> Option<mpsc::Receiver<MediaControlAction>> {
         #[cfg(target_os = "linux")]
         {
-            let mut out = Vec::new();
-            if let Some(rx) = self.events_rx.as_ref() {
-                while let Ok(event) = rx.try_recv() {
-                    out.push(event);
-                }
-            }
-            return out;
+            return self.events_rx.take();
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            Vec::new()
+            None
         }
     }
 }

@@ -33,7 +33,7 @@ impl PlaylistStore {
     }
 
     pub fn create(&self, name: &str) -> Result<()> {
-        let path = self.path_for(name);
+        let path = self.path_for(name)?;
         if path.exists() {
             anyhow::bail!("playlist already exists: {name}");
         }
@@ -43,11 +43,12 @@ impl PlaylistStore {
     }
 
     pub fn delete(&self, name: &str) -> Result<()> {
-        fs::remove_file(self.path_for(name)).with_context(|| format!("failed to delete playlist {name}"))
+        let path = self.path_for(name)?;
+        fs::remove_file(path).with_context(|| format!("failed to delete playlist {name}"))
     }
 
     pub fn read(&self, name: &str) -> Result<Vec<PathBuf>> {
-        let path = self.path_for(name);
+        let path = self.path_for(name)?;
         let content = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
         Ok(content
             .lines()
@@ -58,7 +59,7 @@ impl PlaylistStore {
     }
 
     pub fn append(&self, name: &str, files: &[PathBuf]) -> Result<()> {
-        let path = self.path_for(name);
+        let path = self.path_for(name)?;
         if !path.exists() {
             self.create(name)?;
         }
@@ -73,16 +74,52 @@ impl PlaylistStore {
             out.push_str(&file.to_string_lossy());
             out.push('\n');
         }
-        fs::write(self.path_for(name), out)?;
+        let path = self.path_for(name)?;
+        fs::write(path, out)?;
         Ok(())
     }
 
-    pub fn file_path(&self, name: &str) -> PathBuf {
+    pub fn file_path(&self, name: &str) -> Result<PathBuf> {
         self.path_for(name)
     }
 
-    fn path_for(&self, name: &str) -> PathBuf {
-        let safe = name.trim().trim_end_matches(".m3u");
-        self.dir.join(format!("{safe}.m3u"))
+    fn path_for(&self, name: &str) -> Result<PathBuf> {
+        let safe = validate_name(name)?;
+        let path = self.dir.join(format!("{safe}.m3u"));
+
+        let dir_canon = self.dir.canonicalize().unwrap_or_else(|_| self.dir.clone());
+        let parent = path.parent().unwrap_or(&self.dir);
+        let parent_canon = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+        if !parent_canon.starts_with(&dir_canon) {
+            anyhow::bail!("invalid playlist name: {name}");
+        }
+
+        Ok(path)
     }
+}
+
+fn validate_name(name: &str) -> Result<String> {
+    let trimmed = name.trim().trim_end_matches(".m3u").trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("playlist name cannot be empty");
+    }
+    if trimmed == "." || trimmed == ".." {
+        anyhow::bail!("invalid playlist name");
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with('~') {
+        anyhow::bail!("invalid playlist name");
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        anyhow::bail!("invalid playlist name");
+    }
+    if trimmed.contains("..") {
+        anyhow::bail!("invalid playlist name");
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
+    {
+        anyhow::bail!("invalid playlist name");
+    }
+    Ok(trimmed.to_string())
 }

@@ -5,7 +5,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
-    sync::mpsc,
+    sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::Duration,
 };
@@ -40,7 +40,8 @@ pub fn run(config: Config, library: Library, playlists: PlaylistStore) -> Result
         }
     }
     let listener = UnixListener::bind(&socket)?;
-    let (request_tx, request_rx) = mpsc::channel::<DaemonRequest>();
+    let (event_tx, event_rx) = mpsc::channel::<CoreEvent>();
+    let request_tx = event_tx.clone();
     let _socket_thread = thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue; };
@@ -51,32 +52,41 @@ pub fn run(config: Config, library: Library, playlists: PlaylistStore) -> Result
     });
 
     let mut state = DaemonState::new(config.data_dir.clone(), library, playlists)?;
+    if let Some(media_rx) = state.media.take_events_rx() {
+        let media_tx = event_tx.clone();
+        let _media_thread = thread::spawn(move || {
+            while let Ok(event) = media_rx.recv() {
+                let _ = media_tx.send(CoreEvent::Media(event));
+            }
+        });
+    }
 
     let result = loop {
-        while let Ok(request) = request_rx.try_recv() {
-            let response = match state.handle_command(request.command) {
-                Ok(_) => "ok".to_string(),
-                Err(err) => err.to_string(),
-            };
-            let _ = request.response_tx.send(response);
-        }
-
-        for event in state.media.poll_events() {
-            if let Err(error) = state.handle_media_event(event) {
-                eprintln!("daemon media event error: {error}");
+        match event_rx.recv_timeout(Duration::from_millis(300)) {
+            Ok(event) => {
+                handle_event(&mut state, event);
+                while let Ok(event) = event_rx.try_recv() {
+                    handle_event(&mut state, event);
+                }
             }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break Ok(()),
         }
 
         if state.on_audio_tick()? {
             break Ok(());
         }
 
-        thread::sleep(Duration::from_millis(5));
     };
 
-    drop(request_rx);
+    drop(event_rx);
     let _ = fs::remove_file(&socket);
     result
+}
+
+enum CoreEvent {
+    Request(DaemonRequest),
+    Media(MediaControlAction),
 }
 
 struct DaemonRequest {
@@ -84,19 +94,36 @@ struct DaemonRequest {
     response_tx: mpsc::Sender<String>,
 }
 
-fn handle_stream(request_tx: &mpsc::Sender<DaemonRequest>, stream: UnixStream) -> Result<()> {
+fn handle_stream(request_tx: &mpsc::Sender<CoreEvent>, stream: UnixStream) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let command: DaemonCommand = serde_json::from_str(line.trim())?;
     let (response_tx, response_rx) = mpsc::channel();
-    request_tx.send(DaemonRequest { command, response_tx })?;
+    request_tx.send(CoreEvent::Request(DaemonRequest { command, response_tx }))?;
     let response = response_rx.recv()?;
 
     let mut stream = reader.into_inner();
     stream.write_all(response.as_bytes())?;
     stream.flush()?;
     Ok(())
+}
+
+fn handle_event(state: &mut DaemonState, event: CoreEvent) {
+    match event {
+        CoreEvent::Request(request) => {
+            let response = match state.handle_command(request.command) {
+                Ok(_) => "ok".to_string(),
+                Err(err) => err.to_string(),
+            };
+            let _ = request.response_tx.send(response);
+        }
+        CoreEvent::Media(event) => {
+            if let Err(error) = state.handle_media_event(event) {
+                eprintln!("daemon media event error: {error}");
+            }
+        }
+    }
 }
 
 struct DaemonState {
@@ -194,6 +221,7 @@ impl DaemonState {
             }
             DaemonCommand::Stop => {
                 self.player.stop();
+                self.current = None;
                 self.media.finished();
                 self.should_stop = true;
                 self.persist_state()?;

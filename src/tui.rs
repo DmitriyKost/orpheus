@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::{
+    fs,
     io,
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::Result;
@@ -64,6 +65,7 @@ impl Default for Theme {
 struct App {
     config: Config,
     tracks: Vec<Track>,
+    library_track_count: usize,
     filtered: Vec<usize>,
     queue_filtered: Vec<usize>,
     queue: Vec<usize>,
@@ -82,6 +84,9 @@ struct App {
     pending_z: bool,
     editor_request: Option<PathBuf>,
     theme: Theme,
+    snapshot_mtime: Option<SystemTime>,
+    path_index: HashMap<String, usize>,
+    path_index_dirty: bool,
     playlists: PlaylistStore,
 }
 
@@ -96,6 +101,7 @@ impl App {
         let mut app = Self {
             config,
             tracks,
+            library_track_count: 0,
             filtered,
             queue_filtered: Vec::new(),
             queue: Vec::new(),
@@ -114,8 +120,13 @@ impl App {
             pending_z: false,
             editor_request: None,
             theme: Theme::default(),
+            snapshot_mtime: None,
+            path_index: HashMap::new(),
+            path_index_dirty: true,
             playlists,
         };
+
+        app.library_track_count = app.tracks.len();
 
         app.apply_queue_filter();
 
@@ -134,24 +145,9 @@ impl App {
             return;
         };
 
-        let mut by_path = self
-            .tracks
-            .iter()
-            .enumerate()
-            .map(|(idx, track)| (path_key(&track.path), idx))
-            .collect::<HashMap<_, _>>();
-
         self.queue.clear();
         for path in snapshot.queue {
-            let key = path_key(Path::new(&path));
-            let idx = if let Some(idx) = by_path.get(&key).copied() {
-                idx
-            } else {
-                let idx = self.tracks.len();
-                self.tracks.push(Track::from_path(PathBuf::from(&path)));
-                by_path.insert(key, idx);
-                idx
-            };
+            let idx = self.track_index_for_path_or_insert(Path::new(&path));
             self.queue.push(idx);
         }
 
@@ -166,12 +162,31 @@ impl App {
             self.status = String::from("loaded daemon queue");
         }
         self.apply_queue_filter();
+        self.garbage_collect_transient_tracks();
     }
 
     fn on_tick(&mut self) {
-        self.sync_from_daemon_snapshot();
+        if self.snapshot_changed() {
+            self.sync_from_daemon_snapshot();
+        }
         self.queue_filtered.retain(|pos| *pos < self.queue.len());
         self.normalize_selection();
+    }
+
+    fn snapshot_changed(&mut self) -> bool {
+        let path = process::state_path(&self.config.data_dir);
+        let Ok(meta) = fs::metadata(path) else {
+            self.snapshot_mtime = None;
+            return false;
+        };
+        let Ok(modified) = meta.modified() else {
+            return true;
+        };
+        if self.snapshot_mtime == Some(modified) {
+            return false;
+        }
+        self.snapshot_mtime = Some(modified);
+        true
     }
 
     fn sync_from_daemon_snapshot(&mut self) {
@@ -179,24 +194,9 @@ impl App {
             return;
         };
 
-        let mut by_path = self
-            .tracks
-            .iter()
-            .enumerate()
-            .map(|(idx, track)| (path_key(&track.path), idx))
-            .collect::<HashMap<_, _>>();
-
         let mut daemon_queue = Vec::new();
         for path in snapshot.queue {
-            let key = path_key(Path::new(&path));
-            let idx = if let Some(idx) = by_path.get(&key).copied() {
-                idx
-            } else {
-                let idx = self.tracks.len();
-                self.tracks.push(Track::from_path(PathBuf::from(&path)));
-                by_path.insert(key, idx);
-                idx
-            };
+            let idx = self.track_index_for_path_or_insert(Path::new(&path));
             daemon_queue.push(idx);
         }
 
@@ -211,6 +211,7 @@ impl App {
         }
 
         self.current_queue_pos = snapshot.current.filter(|idx| *idx < self.queue.len());
+        self.garbage_collect_transient_tracks();
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -275,9 +276,20 @@ impl App {
         }
         if self.pending_d {
             self.pending_d = false;
-            if matches!(key.code, KeyCode::Char('d')) {
-                self.remove_selected_from_queue();
-                return Ok(());
+            match key.code {
+                KeyCode::Char('d') => {
+                    self.remove_selected_from_queue();
+                    return Ok(());
+                }
+                KeyCode::Char('j') => {
+                    self.delete_with_next();
+                    return Ok(());
+                }
+                KeyCode::Char('k') => {
+                    self.delete_with_previous();
+                    return Ok(());
+                }
+                _ => {}
             }
         }
         if self.pending_z {
@@ -532,6 +544,11 @@ impl App {
         let Some(pos) = self.selected_queue_pos() else {
             return;
         };
+        let selected_after = if self.queue.len() <= 1 {
+            None
+        } else {
+            Some(pos.min(self.queue.len() - 2))
+        };
         self.queue.remove(pos);
         if let Some(current) = self.current_queue_pos {
             self.current_queue_pos = if current == pos {
@@ -547,8 +564,77 @@ impl App {
             };
         }
         self.apply_queue_filter();
+        if let Some(pos) = selected_after {
+            if let Some(filtered_pos) = self.queue_filtered.iter().position(|p| *p == pos) {
+                self.queue_state.select(Some(filtered_pos));
+            }
+        }
         match self.sync_daemon_queue() {
             Ok(_) => self.status = String::from("removed item from queue"),
+            Err(error) => self.status = format!("removed locally ({error})"),
+        }
+    }
+
+    fn delete_with_next(&mut self) {
+        if self.active_pane != Pane::Queue {
+            return;
+        }
+        let Some(pos) = self.selected_queue_pos() else {
+            return;
+        };
+        if self.queue.is_empty() {
+            return;
+        }
+        let end = (pos + 1).min(self.queue.len() - 1);
+        self.delete_queue_range(pos, end);
+    }
+
+    fn delete_with_previous(&mut self) {
+        if self.active_pane != Pane::Queue {
+            return;
+        }
+        let Some(pos) = self.selected_queue_pos() else {
+            return;
+        };
+        if self.queue.is_empty() {
+            return;
+        }
+        let start = pos.saturating_sub(1);
+        self.delete_queue_range(start, pos);
+    }
+
+    fn delete_queue_range(&mut self, start: usize, end: usize) {
+        if start >= self.queue.len() || end >= self.queue.len() || start > end {
+            return;
+        }
+
+        let count = end - start + 1;
+        self.queue.drain(start..=end);
+
+        if let Some(current) = self.current_queue_pos {
+            self.current_queue_pos = if (start..=end).contains(&current) {
+                if self.queue.is_empty() {
+                    None
+                } else {
+                    Some(start.min(self.queue.len() - 1))
+                }
+            } else if current > end {
+                Some(current - count)
+            } else {
+                Some(current)
+            };
+        }
+
+        self.apply_queue_filter();
+        if !self.queue.is_empty() {
+            let pos = start.min(self.queue.len() - 1);
+            if let Some(filtered_pos) = self.queue_filtered.iter().position(|p| *p == pos) {
+                self.queue_state.select(Some(filtered_pos));
+            }
+        }
+
+        match self.sync_daemon_queue() {
+            Ok(_) => self.status = String::from("removed queue range"),
             Err(error) => self.status = format!("removed locally ({error})"),
         }
     }
@@ -632,7 +718,7 @@ impl App {
 
     fn open_queue_in_editor(&mut self) -> Result<()> {
         self.save_queue()?;
-        self.editor_request = Some(self.playlists.file_path("tui-queue"));
+        self.editor_request = Some(self.playlists.file_path("tui-queue")?);
         Ok(())
     }
 
@@ -652,29 +738,81 @@ impl App {
 
     fn reload_queue_from_playlist(&mut self, name: &str) -> Result<()> {
         let files = self.playlists.read(name)?;
-        let mut by_path = self
-            .tracks
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (path_key(&t.path), i))
-            .collect::<HashMap<_, _>>();
-
         self.queue.clear();
         for path in files {
-            let key = path_key(&path);
-            let idx = if let Some(idx) = by_path.get(&key).copied() {
-                idx
-            } else {
-                let idx = self.tracks.len();
-                self.tracks.push(Track::from_path(path.clone()));
-                by_path.insert(key, idx);
-                idx
-            };
+            let idx = self.track_index_for_path_or_insert(&path);
             self.queue.push(idx);
         }
         self.current_queue_pos = self.current_queue_pos.filter(|idx| *idx < self.queue.len());
         self.apply_queue_filter();
+        self.garbage_collect_transient_tracks();
         Ok(())
+    }
+
+    fn garbage_collect_transient_tracks(&mut self) {
+        if self.tracks.len() <= self.library_track_count {
+            return;
+        }
+
+        let mut used_transient = std::collections::HashSet::<usize>::new();
+        for idx in &self.queue {
+            if *idx >= self.library_track_count {
+                used_transient.insert(*idx);
+            }
+        }
+
+        if used_transient.is_empty() {
+            self.tracks.truncate(self.library_track_count);
+            return;
+        }
+
+        let mut new_tracks = self.tracks[..self.library_track_count].to_vec();
+        let mut remap = HashMap::<usize, usize>::new();
+
+        let mut transient_sorted = used_transient.into_iter().collect::<Vec<_>>();
+        transient_sorted.sort_unstable();
+        for old_idx in transient_sorted {
+            if let Some(track) = self.tracks.get(old_idx).cloned() {
+                let new_idx = new_tracks.len();
+                new_tracks.push(track);
+                remap.insert(old_idx, new_idx);
+            }
+        }
+
+        for idx in &mut self.queue {
+            if *idx >= self.library_track_count {
+                if let Some(mapped) = remap.get(idx).copied() {
+                    *idx = mapped;
+                }
+            }
+        }
+
+        self.tracks = new_tracks;
+        self.current_queue_pos = self.current_queue_pos.filter(|idx| *idx < self.queue.len());
+        self.path_index_dirty = true;
+    }
+
+    fn track_index_for_path_or_insert(&mut self, path: &Path) -> usize {
+        self.rebuild_path_index_if_needed();
+        let key = path_key(path);
+        if let Some(idx) = self.path_index.get(&key).copied() {
+            return idx;
+        }
+        let idx = self.tracks.len();
+        self.tracks.push(Track::from_path(path.to_path_buf()));
+        self.path_index.insert(key, idx);
+        idx
+    }
+
+    fn rebuild_path_index_if_needed(&mut self) {
+        if !self.path_index_dirty {
+            return;
+        }
+        self.path_index.clear();
+        for (idx, track) in self.tracks.iter().enumerate() {
+            self.path_index.insert(path_key(&track.path), idx);
+        }
+        self.path_index_dirty = false;
     }
 
     fn submit_command_mode(&mut self) {
