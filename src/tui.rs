@@ -21,13 +21,20 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
+use serde::{Deserialize, Serialize};
 
-use crate::{config::Config, library::Track, playlist::PlaylistStore, process};
+use crate::{config::Config, library::Track, playlist::{PlaylistStore, PlaylistSummary}, process};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Pane {
     Library,
     Queue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum LeftView {
+    Library,
+    Playlists,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +79,9 @@ struct App {
     current_queue_pos: Option<usize>,
     library_state: ListState,
     queue_state: ListState,
+    playlist_state: ListState,
     active_pane: Pane,
+    left_view: LeftView,
     mode: Mode,
     search: String,
     search_target: Pane,
@@ -87,7 +96,19 @@ struct App {
     snapshot_mtime: Option<SystemTime>,
     path_index: HashMap<String, usize>,
     path_index_dirty: bool,
+    playlists_cache: Vec<PlaylistSummary>,
     playlists: PlaylistStore,
+    active_playlist: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UiState {
+    active_pane: Pane,
+    left_view: LeftView,
+    library_selected: Option<usize>,
+    queue_selected: Option<usize>,
+    playlist_selected: Option<usize>,
+    active_playlist: String,
 }
 
 impl App {
@@ -108,12 +129,14 @@ impl App {
             current_queue_pos: None,
             library_state,
             queue_state: ListState::default(),
+            playlist_state: ListState::default(),
             active_pane: Pane::Library,
+            left_view: LeftView::Library,
             mode: Mode::Normal,
             search: String::new(),
             search_target: Pane::Library,
             command_input: String::new(),
-            status: String::from("nvim keys: hjkl gg G Ctrl-d/u dd J/K Enter / v :q ZZ"),
+            status: String::from("keys: hjkl gg G Ctrl-d/u Enter / p a dd J/K v c :q ZZ"),
             should_quit: false,
             pending_g: false,
             pending_d: false,
@@ -123,12 +146,16 @@ impl App {
             snapshot_mtime: None,
             path_index: HashMap::new(),
             path_index_dirty: true,
+            playlists_cache: Vec::new(),
             playlists,
+            active_playlist: String::from("tui-queue"),
         };
 
         app.library_track_count = app.tracks.len();
 
+        app.ensure_active_playlist_exists();
         app.apply_queue_filter();
+        app.refresh_playlists();
 
         app.load_daemon_snapshot();
         if !app.queue.is_empty() {
@@ -137,6 +164,7 @@ impl App {
                 Err(error) => app.status = format!("daemon restore failed ({error})"),
             }
         }
+        app.restore_ui_state();
         Ok(app)
     }
 
@@ -173,6 +201,67 @@ impl App {
         self.normalize_selection();
     }
 
+    fn refresh_playlists(&mut self) {
+        self.playlists_cache = self.playlists.list().unwrap_or_default();
+        if self.playlists_cache.is_empty() {
+            self.playlist_state.select(None);
+        } else {
+            let idx = self
+                .playlist_state
+                .selected()
+                .unwrap_or(0)
+                .min(self.playlists_cache.len() - 1);
+            self.playlist_state.select(Some(idx));
+        }
+    }
+
+    fn ensure_active_playlist_exists(&mut self) {
+        if self.playlists.create(&self.active_playlist).is_ok() {
+            return;
+        }
+    }
+
+    fn selected_playlist_name(&self) -> Option<&str> {
+        let idx = self.playlist_state.selected()?;
+        self.playlists_cache.get(idx).map(|p| p.name.as_str())
+    }
+
+    fn ui_state_path(&self) -> PathBuf {
+        self.config.data_dir.join("ui-state.json")
+    }
+
+    fn restore_ui_state(&mut self) {
+        let Ok(raw) = fs::read_to_string(self.ui_state_path()) else {
+            return;
+        };
+        let Ok(state) = serde_json::from_str::<UiState>(&raw) else {
+            return;
+        };
+        self.active_pane = state.active_pane;
+        self.left_view = state.left_view;
+        self.library_state.select(state.library_selected.filter(|i| *i < self.filtered.len()));
+        self.queue_state.select(state.queue_selected.filter(|i| *i < self.queue_filtered.len()));
+        self.playlist_state.select(state.playlist_selected.filter(|i| *i < self.playlists_cache.len()));
+        if !state.active_playlist.trim().is_empty() {
+            self.active_playlist = state.active_playlist;
+        }
+        self.normalize_selection();
+    }
+
+    fn persist_ui_state(&self) {
+        let state = UiState {
+            active_pane: self.active_pane,
+            left_view: self.left_view,
+            library_selected: self.library_state.selected(),
+            queue_selected: self.queue_state.selected(),
+            playlist_selected: self.playlist_state.selected(),
+            active_playlist: self.active_playlist.clone(),
+        };
+        if let Ok(raw) = serde_json::to_string(&state) {
+            let _ = fs::write(self.ui_state_path(), raw);
+        }
+    }
+
     fn snapshot_changed(&mut self) -> bool {
         let path = process::state_path(&self.config.data_dir);
         let Ok(meta) = fs::metadata(path) else {
@@ -200,17 +289,9 @@ impl App {
             daemon_queue.push(idx);
         }
 
-        if daemon_queue != self.queue {
-            self.queue = daemon_queue;
-            if self.mode != Mode::Search || self.search_target != Pane::Queue {
-                self.search.clear();
-                self.reset_filters();
-            } else {
-                self.apply_queue_filter();
-            }
+        if daemon_queue == self.queue {
+            self.current_queue_pos = snapshot.current.filter(|idx| *idx < self.queue.len());
         }
-
-        self.current_queue_pos = snapshot.current.filter(|idx| *idx < self.queue.len());
         self.garbage_collect_transient_tracks();
     }
 
@@ -278,7 +359,11 @@ impl App {
             self.pending_d = false;
             match key.code {
                 KeyCode::Char('d') => {
-                    self.remove_selected_from_queue();
+                    if self.active_pane == Pane::Library && self.left_view == LeftView::Playlists {
+                        let _ = self.delete_selected_playlist();
+                    } else {
+                        self.remove_selected_from_queue();
+                    }
                     return Ok(());
                 }
                 KeyCode::Char('j') => {
@@ -317,6 +402,13 @@ impl App {
             KeyCode::Tab => self.toggle_pane(),
             KeyCode::Char('h') => self.active_pane = Pane::Library,
             KeyCode::Char('l') => self.active_pane = Pane::Queue,
+            KeyCode::Char('p') if self.active_pane == Pane::Library => {
+                self.left_view = match self.left_view {
+                    LeftView::Library => LeftView::Playlists,
+                    LeftView::Playlists => LeftView::Library,
+                };
+                self.refresh_playlists();
+            }
             KeyCode::Char('/') => {
                 self.mode = Mode::Search;
                 self.search.clear();
@@ -343,8 +435,18 @@ impl App {
                 }
             }
             KeyCode::Char('a') => self.append_selected_to_queue(),
+            KeyCode::Char('c') if self.active_pane == Pane::Library && self.left_view == LeftView::Playlists => {
+                self.mode = Mode::Command;
+                self.command_input = String::from("plnew ");
+            }
             KeyCode::Char('S') => self.save_queue()?,
-            KeyCode::Char('v') => self.open_queue_in_editor()?,
+            KeyCode::Char('v') => {
+                if self.active_pane == Pane::Library && self.left_view == LeftView::Playlists {
+                    self.open_selected_playlist_in_editor()?;
+                } else {
+                    self.open_queue_in_editor()?;
+                }
+            }
             _ => {}
         }
         self.normalize_selection();
@@ -353,7 +455,10 @@ impl App {
 
     fn page_move(&mut self, delta: isize) {
         match self.active_pane {
-            Pane::Library => select_relative(&mut self.library_state, self.filtered.len(), delta),
+            Pane::Library => match self.left_view {
+                LeftView::Library => select_relative(&mut self.library_state, self.filtered.len(), delta),
+                LeftView::Playlists => select_relative(&mut self.playlist_state, self.playlists_cache.len(), delta),
+            },
             Pane::Queue => select_relative(&mut self.queue_state, self.queue_filtered.len(), delta),
         }
     }
@@ -443,6 +548,13 @@ impl App {
             None if queue_len > 0 => self.queue_state.select(Some(0)),
             _ => {}
         }
+
+        let pl_len = self.playlists_cache.len();
+        match self.playlist_state.selected() {
+            Some(idx) if idx >= pl_len => self.playlist_state.select(pl_len.checked_sub(1)),
+            None if pl_len > 0 => self.playlist_state.select(Some(0)),
+            _ => {}
+        }
     }
 
     fn toggle_pane(&mut self) {
@@ -453,6 +565,9 @@ impl App {
     }
 
     fn selected_library_track(&self) -> Option<usize> {
+        if self.left_view != LeftView::Library {
+            return None;
+        }
         self.library_state
             .selected()
             .and_then(|i| self.filtered.get(i).copied())
@@ -465,21 +580,28 @@ impl App {
 
     fn select_next(&mut self) {
         match self.active_pane {
-            Pane::Library => select_relative(&mut self.library_state, self.filtered.len(), 1),
+            Pane::Library => match self.left_view {
+                LeftView::Library => select_relative(&mut self.library_state, self.filtered.len(), 1),
+                LeftView::Playlists => select_relative(&mut self.playlist_state, self.playlists_cache.len(), 1),
+            },
             Pane::Queue => select_relative(&mut self.queue_state, self.queue_filtered.len(), 1),
         }
     }
 
     fn select_previous(&mut self) {
         match self.active_pane {
-            Pane::Library => select_relative(&mut self.library_state, self.filtered.len(), -1),
+            Pane::Library => match self.left_view {
+                LeftView::Library => select_relative(&mut self.library_state, self.filtered.len(), -1),
+                LeftView::Playlists => select_relative(&mut self.playlist_state, self.playlists_cache.len(), -1),
+            },
             Pane::Queue => select_relative(&mut self.queue_state, self.queue_filtered.len(), -1),
         }
     }
 
     fn select_first(&mut self) {
         match self.active_pane {
-            Pane::Library if !self.filtered.is_empty() => self.library_state.select(Some(0)),
+            Pane::Library if self.left_view == LeftView::Library && !self.filtered.is_empty() => self.library_state.select(Some(0)),
+            Pane::Library if self.left_view == LeftView::Playlists && !self.playlists_cache.is_empty() => self.playlist_state.select(Some(0)),
             Pane::Queue if !self.queue_filtered.is_empty() => self.queue_state.select(Some(0)),
             _ => {}
         }
@@ -487,8 +609,11 @@ impl App {
 
     fn select_last(&mut self) {
         match self.active_pane {
-            Pane::Library if !self.filtered.is_empty() => {
-                self.library_state.select(Some(self.filtered.len() - 1))
+            Pane::Library if self.left_view == LeftView::Library && !self.filtered.is_empty() => {
+                self.library_state.select(Some(self.filtered.len() - 1));
+            }
+            Pane::Library if self.left_view == LeftView::Playlists && !self.playlists_cache.is_empty() => {
+                self.playlist_state.select(Some(self.playlists_cache.len() - 1));
             }
             Pane::Queue if !self.queue_filtered.is_empty() => {
                 self.queue_state.select(Some(self.queue_filtered.len() - 1))
@@ -500,16 +625,27 @@ impl App {
     fn activate_selected(&mut self) -> Result<()> {
         match self.active_pane {
             Pane::Library => {
-                let Some(selected) = self.library_state.selected() else {
-                    return Ok(());
-                };
-                self.queue = self.filtered.iter().skip(selected).copied().collect();
-                self.current_queue_pos = if self.queue.is_empty() { None } else { Some(0) };
-                self.search.clear();
-                self.mode = Mode::Normal;
-                self.reset_filters();
-                self.queue_state.select(if self.queue.is_empty() { None } else { Some(0) });
-                self.play_queue_pos(0)?;
+                match self.left_view {
+                    LeftView::Library => {
+                        let Some(track_idx) = self.selected_library_track() else {
+                            return Ok(());
+                        };
+                        self.play_single_track(track_idx)?;
+                    }
+                    LeftView::Playlists => {
+                        let Some(name) = self.selected_playlist_name().map(str::to_string) else {
+                            return Ok(());
+                        };
+                        self.active_playlist = name.clone();
+                        self.reload_queue_from_playlist(&name)?;
+                        self.current_queue_pos = if self.queue.is_empty() { None } else { Some(0) };
+                        if !self.queue.is_empty() {
+                            self.play_queue_pos(0)?;
+                            self.active_pane = Pane::Queue;
+                        }
+                        self.status = format!("active playlist: {}", self.active_playlist);
+                    }
+                }
                 Ok(())
             }
             Pane::Queue => {
@@ -532,7 +668,10 @@ impl App {
             self.queue_state.select(Some(0));
         }
         match self.sync_daemon_queue() {
-            Ok(_) => self.status = format!("queued {}", self.tracks[track_idx].display_name()),
+            Ok(_) => {
+                let _ = self.persist_active_playlist();
+                self.status = format!("queued {}", self.tracks[track_idx].display_name());
+            }
             Err(error) => self.status = format!("queue staged locally ({error})"),
         }
     }
@@ -570,7 +709,10 @@ impl App {
             }
         }
         match self.sync_daemon_queue() {
-            Ok(_) => self.status = String::from("removed item from queue"),
+            Ok(_) => {
+                let _ = self.persist_active_playlist();
+                self.status = String::from("removed item from queue");
+            }
             Err(error) => self.status = format!("removed locally ({error})"),
         }
     }
@@ -634,7 +776,10 @@ impl App {
         }
 
         match self.sync_daemon_queue() {
-            Ok(_) => self.status = String::from("removed queue range"),
+            Ok(_) => {
+                let _ = self.persist_active_playlist();
+                self.status = String::from("removed queue range");
+            }
             Err(error) => self.status = format!("removed locally ({error})"),
         }
     }
@@ -669,9 +814,30 @@ impl App {
             target.min(self.queue_filtered.len().saturating_sub(1)),
         ));
         match self.sync_daemon_queue() {
-            Ok(_) => self.status = String::from("moved queue item"),
+            Ok(_) => {
+                let _ = self.persist_active_playlist();
+                self.status = String::from("moved queue item");
+            }
             Err(error) => self.status = format!("moved locally ({error})"),
         }
+    }
+
+    fn play_single_track(&mut self, track_idx: usize) -> Result<()> {
+        let input = self.tracks[track_idx].path.to_string_lossy().to_string();
+        let started = process::ensure_daemon_and_send_command(
+            &self.config.data_dir,
+            &process::DaemonCommand::Replace {
+                inputs: vec![input],
+            },
+        )?;
+        self.current_queue_pos = None;
+        let track = &self.tracks[track_idx];
+        self.status = if started {
+            format!("playing single track {}", track.display_name())
+        } else {
+            format!("updated playback to {}", track.display_name())
+        };
+        Ok(())
     }
 
     fn play_queue_pos(&mut self, pos: usize) -> Result<()> {
@@ -705,20 +871,44 @@ impl App {
         Ok(())
     }
 
-    fn save_queue(&mut self) -> Result<()> {
+    fn persist_active_playlist(&mut self) -> Result<()> {
         let files = self
             .queue
             .iter()
             .map(|idx| self.tracks[*idx].path.clone())
             .collect::<Vec<_>>();
-        self.playlists.write("tui-queue", &files)?;
-        self.status = String::from("saved queue as playlist 'tui-queue'");
+        self.playlists.write(&self.active_playlist, &files)?;
+        self.refresh_playlists();
+        Ok(())
+    }
+
+    fn save_queue(&mut self) -> Result<()> {
+        self.persist_active_playlist()?;
+        self.status = format!("saved queue to playlist '{}'", self.active_playlist);
         Ok(())
     }
 
     fn open_queue_in_editor(&mut self) -> Result<()> {
         self.save_queue()?;
-        self.editor_request = Some(self.playlists.file_path("tui-queue")?);
+        self.editor_request = Some(self.playlists.file_path(&self.active_playlist)?);
+        Ok(())
+    }
+
+    fn open_selected_playlist_in_editor(&mut self) -> Result<()> {
+        let Some(name) = self.selected_playlist_name().map(str::to_string) else {
+            return Ok(());
+        };
+        self.editor_request = Some(self.playlists.file_path(&name)?);
+        Ok(())
+    }
+
+    fn delete_selected_playlist(&mut self) -> Result<()> {
+        let Some(name) = self.selected_playlist_name().map(str::to_string) else {
+            return Ok(());
+        };
+        self.playlists.delete(&name)?;
+        self.refresh_playlists();
+        self.status = format!("deleted playlist {name}");
         Ok(())
     }
 
@@ -816,11 +1006,25 @@ impl App {
     }
 
     fn submit_command_mode(&mut self) {
-        let cmd = self.command_input.trim();
-        match cmd {
+        let cmd = self.command_input.trim().to_string();
+        if let Some(name) = cmd
+            .strip_prefix("plnew ")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            match self.playlists.create(name) {
+                Ok(_) => {
+                    self.refresh_playlists();
+                    self.status = format!("created playlist {name}");
+                }
+                Err(error) => self.status = error.to_string(),
+            }
+        } else {
+            match cmd.as_str() {
             "q" | "quit" => self.should_quit = true,
             "" => {}
             other => self.status = format!("unknown command: :{other}"),
+            }
         }
         self.command_input.clear();
         self.mode = Mode::Normal;
@@ -847,10 +1051,16 @@ pub fn run(config: Config, tracks: Vec<Track>, playlists: PlaylistStore) -> Resu
             restore_terminal(&mut terminal)?;
             open_in_editor(&path)?;
             terminal = init_terminal()?;
-            app.reload_queue_from_playlist("tui-queue")?;
-            match app.sync_daemon_queue() {
-                Ok(_) => app.status = String::from("queue updated from editor"),
-                Err(error) => app.status = format!("editor queue local only ({error})"),
+            if path.file_stem().and_then(|s| s.to_str()) == Some(app.active_playlist.as_str()) {
+                let active = app.active_playlist.clone();
+                app.reload_queue_from_playlist(&active)?;
+                match app.sync_daemon_queue() {
+                    Ok(_) => app.status = String::from("queue updated from editor"),
+                    Err(error) => app.status = format!("editor queue local only ({error})"),
+                }
+            } else {
+                app.refresh_playlists();
+                app.status = String::from("playlist updated from editor");
             }
         }
 
@@ -864,6 +1074,7 @@ pub fn run(config: Config, tracks: Vec<Track>, playlists: PlaylistStore) -> Resu
         }
     };
 
+    app.persist_ui_state();
     restore_terminal(&mut terminal)?;
     result
 }
@@ -922,23 +1133,35 @@ fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_library(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let items = app
-        .filtered
-        .iter()
-        .map(|idx| {
-            let track = &app.tracks[*idx];
-            ListItem::new(Line::from(vec![Span::raw(track.display_name())]))
-        })
-        .collect::<Vec<_>>();
-
-    let title = if !app.search.is_empty() && app.search_target == Pane::Library {
-        format!(
-            "Library [{} track(s)]  filter: /{}",
-            app.filtered.len(),
-            app.search
-        )
-    } else {
-        format!("Library {} track(s)", app.filtered.len())
+    let (title, items, state): (String, Vec<ListItem>, &mut ListState) = match app.left_view {
+        LeftView::Library => {
+            let items = app
+                .filtered
+                .iter()
+                .map(|idx| {
+                    let track = &app.tracks[*idx];
+                    ListItem::new(Line::from(vec![Span::raw(track.display_name())]))
+                })
+                .collect::<Vec<_>>();
+            let title = if !app.search.is_empty() && app.search_target == Pane::Library {
+                format!("Library [{} track(s)]  filter: /{}", app.filtered.len(), app.search)
+            } else {
+                format!("Library {} track(s)", app.filtered.len())
+            };
+            (title, items, &mut app.library_state)
+        }
+        LeftView::Playlists => {
+            let items = app
+                .playlists_cache
+                .iter()
+                .map(|pl| ListItem::new(Line::from(vec![Span::raw(pl.name.clone())])))
+                .collect::<Vec<_>>();
+            (
+                String::from("Playlists (p toggle, c create, dd delete, v edit)"),
+                items,
+                &mut app.playlist_state,
+            )
+        }
     };
 
     let active_color = if app.mode == Mode::Search && app.search_target == Pane::Library {
@@ -966,7 +1189,7 @@ fn render_library(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
                 .fg(app.theme.list_highlight)
                 .add_modifier(Modifier::BOLD),
         );
-    frame.render_stateful_widget(list, area, &mut app.library_state);
+    frame.render_stateful_widget(list, area, state);
 }
 
 fn render_queue(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
@@ -989,12 +1212,13 @@ fn render_queue(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
 
     let title = if !app.search.is_empty() && app.search_target == Pane::Queue {
         format!(
-            "Queue [{} item(s)]  filter: /{}",
+            "Queue [{} item(s)]  [{}] filter: /{}",
             app.queue_filtered.len(),
+            app.active_playlist,
             app.search
         )
     } else {
-        format!("Queue {} item(s)", app.queue.len())
+        format!("Queue {} item(s) [{}]", app.queue.len(), app.active_playlist)
     };
 
     let active_color = if app.mode == Mode::Search && app.search_target == Pane::Queue {
