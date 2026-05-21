@@ -535,7 +535,11 @@ impl App {
         self.queue.remove(pos);
         if let Some(current) = self.current_queue_pos {
             self.current_queue_pos = if current == pos {
-                None
+                if self.queue.is_empty() {
+                    None
+                } else {
+                    Some(pos.min(self.queue.len() - 1))
+                }
             } else if current > pos {
                 Some(current - 1)
             } else {
@@ -625,10 +629,7 @@ impl App {
             .iter()
             .map(|idx| self.tracks[*idx].path.to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        let current = self
-            .current_queue_pos
-            .filter(|idx| *idx < inputs.len())
-            .or_else(|| (!inputs.is_empty()).then_some(0));
+        let current = self.current_queue_pos.filter(|idx| *idx < inputs.len());
         process::ensure_daemon_and_send_command(
             &self.config.data_dir,
             &process::DaemonCommand::UpdateQueue { inputs, current },

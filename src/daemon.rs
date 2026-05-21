@@ -151,15 +151,45 @@ impl DaemonState {
                 self.persist_state()?;
             }
             DaemonCommand::UpdateQueue { inputs, current } => {
+                let was_paused = self.player.is_paused();
+                let old_current_path = self
+                    .current
+                    .and_then(|idx| self.queue.get(idx))
+                    .map(|track| track.path.clone());
                 let tracks = inputs
                     .into_iter()
                     .map(|path| Track::from_path(std::path::PathBuf::from(path)))
                     .collect::<Vec<_>>();
                 self.queue = tracks;
-                self.current = current
-                    .filter(|idx| *idx < self.queue.len())
-                    .or_else(|| (!self.queue.is_empty()).then_some(0));
-                self.ensure_current_loaded_paused()?;
+                self.current = current.filter(|idx| *idx < self.queue.len());
+
+                if self.queue.is_empty() {
+                    self.player.stop();
+                    self.media.finished();
+                    self.persist_state()?;
+                    return Ok(());
+                }
+
+                if self.current.is_none() {
+                    self.player.stop();
+                    self.media.finished();
+                    self.persist_state()?;
+                    return Ok(());
+                }
+
+                let new_current_path = self
+                    .current
+                    .and_then(|idx| self.queue.get(idx))
+                    .map(|track| track.path.clone());
+                let current_changed = old_current_path != new_current_path;
+
+                if current_changed || self.player.is_empty() {
+                    self.ensure_current_loaded_paused(current_changed)?;
+                    if !was_paused {
+                        self.player.resume();
+                        self.media.set_playing();
+                    }
+                }
                 self.persist_state()?;
             }
             DaemonCommand::Stop => {
@@ -210,7 +240,7 @@ impl DaemonState {
             }
             MediaControlAction::Play => {
                 if self.player.is_empty() {
-                    self.ensure_current_loaded_paused()?;
+                    self.ensure_current_loaded_paused(false)?;
                 }
                 self.player.resume();
                 self.media.set_playing();
@@ -270,12 +300,12 @@ impl DaemonState {
             .current
             .filter(|idx| *idx < self.queue.len())
             .or_else(|| (!self.queue.is_empty()).then_some(0));
-        self.ensure_current_loaded_paused()?;
+        self.ensure_current_loaded_paused(false)?;
         Ok(())
     }
 
-    fn ensure_current_loaded_paused(&mut self) -> Result<()> {
-        if !self.player.is_empty() {
+    fn ensure_current_loaded_paused(&mut self, force_reload: bool) -> Result<()> {
+        if !force_reload && !self.player.is_empty() {
             return Ok(());
         }
         let Some(idx) = self.current else { return Ok(()); };
