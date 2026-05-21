@@ -564,6 +564,19 @@ impl App {
         if target == pos {
             return;
         }
+
+        if let Some(current) = self.current_queue_pos {
+            self.current_queue_pos = if current == pos {
+                Some(target)
+            } else if pos < current && target >= current {
+                Some(current - 1)
+            } else if pos > current && target <= current {
+                Some(current + 1)
+            } else {
+                Some(current)
+            };
+        }
+
         self.queue.swap(pos, target);
         self.apply_queue_filter();
         self.queue_state.select(Some(
