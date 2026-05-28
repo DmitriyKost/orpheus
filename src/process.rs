@@ -25,6 +25,9 @@ pub enum DaemonCommand {
         inputs: Vec<String>,
         current: Option<usize>,
     },
+    TogglePause,
+    Next,
+    Previous,
     Stop,
 }
 

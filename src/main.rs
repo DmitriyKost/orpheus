@@ -7,6 +7,8 @@ mod library;
 mod media;
 mod playlist;
 mod process;
+#[cfg(target_os = "macos")]
+mod statusbar;
 mod tui;
 
 use crate::{
@@ -58,6 +60,10 @@ fn main() -> Result<()> {
         }
         Command::Completion { shell } => {
             print_completion(shell);
+        }
+        #[cfg(target_os = "macos")]
+        Command::MenuBar | Command::MenuBarInternal => {
+            statusbar::run(&config.data_dir)?;
         }
         Command::PlayInternal => {
             daemon::run(config, library, playlists)?;

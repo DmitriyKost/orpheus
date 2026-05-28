@@ -41,6 +41,9 @@ pub fn run(config: Config, library: Library, playlists: PlaylistStore) -> Result
         }
     }
     let listener = UnixListener::bind(&socket)?;
+    #[cfg(target_os = "macos")]
+    let _menu_bar_child = spawn_menu_bar_child(&config.data_dir);
+
     let (event_tx, event_rx) = mpsc::channel::<CoreEvent>();
     let request_tx = event_tx.clone();
     let _socket_thread = thread::spawn(move || {
@@ -255,6 +258,18 @@ impl DaemonState {
                 self.should_stop = true;
                 self.persist_state()?;
             }
+            DaemonCommand::TogglePause => {
+                self.handle_media_event(MediaControlAction::PlayPause)?;
+                self.persist_state()?;
+            }
+            DaemonCommand::Next => {
+                self.handle_media_event(MediaControlAction::Next)?;
+                self.persist_state()?;
+            }
+            DaemonCommand::Previous => {
+                self.handle_media_event(MediaControlAction::Previous)?;
+                self.persist_state()?;
+            }
         }
         Ok(())
     }
@@ -388,4 +403,17 @@ impl DaemonState {
         self.media.set_paused();
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_menu_bar_child(_data_dir: &std::path::Path) -> std::io::Result<std::process::Child> {
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe()?;
+    Command::new(exe)
+        .arg("menu-bar-internal")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
 }

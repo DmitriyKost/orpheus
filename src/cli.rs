@@ -37,6 +37,12 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+    #[cfg(target_os = "macos")]
+    /// Show current track in macOS menu bar.
+    MenuBar,
+    #[cfg(target_os = "macos")]
+    #[command(hide = true)]
+    MenuBarInternal,
     #[command(hide = true)]
     PlayInternal,
     /// Manage m3u playlists stored by Orpheus.

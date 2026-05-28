@@ -17,3 +17,6 @@ walkdir = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.9"
+cocoa = "0.26"
+objc = "0.2"
+libc = "0.2"
