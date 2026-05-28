@@ -5,7 +5,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::mpsc::{self},
     thread,
     time::Duration,
 };
@@ -62,6 +62,20 @@ pub fn run(config: Config, library: Library, playlists: PlaylistStore) -> Result
     }
 
     let result = loop {
+        // On macOS the media-key handlers fire from the Core Foundation run loop on this
+        // (main) thread, so we pump it for a slice instead of blocking on the channel, then
+        // drain any IPC/media events that queued up. On Linux MPRIS events arrive on
+        // souvlaki's own thread, so a plain blocking wait is enough.
+        #[cfg(target_os = "macos")]
+        {
+            crate::media::pump_events(Duration::from_millis(200));
+            while let Ok(event) = event_rx.try_recv() {
+                handle_event(&mut state, event);
+            }
+            state.media.refresh_tick();
+        }
+
+        #[cfg(not(target_os = "macos"))]
         match event_rx.recv_timeout(Duration::from_millis(300)) {
             Ok(event) => {
                 handle_event(&mut state, event);
@@ -69,8 +83,8 @@ pub fn run(config: Config, library: Library, playlists: PlaylistStore) -> Result
                     handle_event(&mut state, event);
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
         }
 
         if state.on_audio_tick()? {
@@ -134,6 +148,10 @@ struct DaemonState {
     playlists: PlaylistStore,
     queue: Vec<Track>,
     current: Option<usize>,
+    // Path of the track currently loaded in the player, tracked separately from `current`
+    // so the persisted snapshot reflects real playback even when the playing track is no
+    // longer in `queue` (see the `UpdateQueue { current: None }` case below).
+    playing_path: Option<String>,
     should_stop: bool,
 }
 
@@ -147,6 +165,7 @@ impl DaemonState {
             playlists,
             queue: Vec::new(),
             current: None,
+            playing_path: None,
             should_stop: false,
         };
 
@@ -192,14 +211,18 @@ impl DaemonState {
 
                 if self.queue.is_empty() {
                     self.player.stop();
+                    self.playing_path = None;
                     self.media.finished();
                     self.persist_state()?;
                     return Ok(());
                 }
 
                 if self.current.is_none() {
-                    self.player.stop();
-                    self.media.finished();
+                    // The queue was edited while the playing track isn't part of it (a
+                    // standalone library pick played over an active playlist). Keep whatever
+                    // is currently playing and just record the updated queue; if nothing is
+                    // playing it simply stays stopped. Playback is only interrupted on an
+                    // explicit Stop or when the queue becomes empty (handled above).
                     self.persist_state()?;
                     return Ok(());
                 }
@@ -222,6 +245,7 @@ impl DaemonState {
             DaemonCommand::Stop => {
                 self.player.stop();
                 self.current = None;
+                self.playing_path = None;
                 self.media.finished();
                 self.should_stop = true;
                 self.persist_state()?;
@@ -238,6 +262,7 @@ impl DaemonState {
                     self.play_current()?;
                 } else {
                     self.current = None;
+                    self.playing_path = None;
                     self.media.finished();
                     self.persist_state()?;
                 }
@@ -249,9 +274,13 @@ impl DaemonState {
 
     fn play_current(&mut self) -> Result<()> {
         let Some(idx) = self.current else { return Ok(()); };
+        let path = self.queue[idx].path.clone();
+        // Start audio before publishing metadata: macOS only accepts Now Playing info
+        // once the process is the active audio app, which CoreAudio output establishes.
+        self.player.play(&path)?;
+        self.playing_path = Some(path.to_string_lossy().to_string());
         let track = &self.queue[idx];
         self.media.track_started(track, duration(&track.path));
-        self.player.play(&track.path)?;
         self.persist_state()?;
         Ok(())
     }
@@ -295,6 +324,7 @@ impl DaemonState {
             MediaControlAction::Stop => {
                 self.player.stop();
                 self.current = None;
+                self.playing_path = None;
                 self.media.finished();
                 self.persist_state()?;
             }
@@ -310,6 +340,7 @@ impl DaemonState {
                 .map(|track| track.path.to_string_lossy().to_string())
                 .collect(),
             current: self.current,
+            playing: self.playing_path.clone(),
         };
         crate::process::write_snapshot(&self.data_dir, &snapshot)
     }
@@ -337,10 +368,12 @@ impl DaemonState {
             return Ok(());
         }
         let Some(idx) = self.current else { return Ok(()); };
-        let Some(track) = self.queue.get(idx) else { return Ok(()); };
-        self.media.track_started(track, duration(&track.path));
-        self.player.play(&track.path)?;
+        let Some(path) = self.queue.get(idx).map(|track| track.path.clone()) else { return Ok(()); };
+        self.player.play(&path)?;
         self.player.pause();
+        self.playing_path = Some(path.to_string_lossy().to_string());
+        let track = &self.queue[idx];
+        self.media.track_started(track, duration(&track.path));
         self.media.set_paused();
         Ok(())
     }

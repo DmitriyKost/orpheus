@@ -25,6 +25,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{config::Config, library::Track, playlist::{PlaylistStore, PlaylistSummary}, process};
 
+/// Name of the default working queue playlist. While this is the active playlist, picking
+/// a single library track makes it the new queue; once a named playlist is active instead,
+/// a library pick plays standalone without disturbing that playlist.
+const DEFAULT_QUEUE_PLAYLIST: &str = "tui-queue";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Pane {
     Library,
@@ -77,6 +82,11 @@ struct App {
     queue_filtered: Vec<usize>,
     queue: Vec<usize>,
     current_queue_pos: Option<usize>,
+    // Display name of the track the daemon is actually playing, taken from its snapshot.
+    // Kept separate from `current_queue_pos` so the "Now" panel reflects real playback even
+    // when the visible queue/playlist diverges from it (e.g. after switching to another
+    // playlist while a track keeps playing).
+    now_playing: Option<String>,
     library_state: ListState,
     queue_state: ListState,
     playlist_state: ListState,
@@ -107,7 +117,10 @@ struct UiState {
     left_view: LeftView,
     library_selected: Option<usize>,
     queue_selected: Option<usize>,
-    playlist_selected: Option<usize>,
+    // Persisted by name, not index: playlists are sorted by name, so a stored index points
+    // at a different playlist once the list changes (e.g. after creating a new one).
+    #[serde(default)]
+    playlist_selected_name: Option<String>,
     active_playlist: String,
 }
 
@@ -127,6 +140,7 @@ impl App {
             queue_filtered: Vec::new(),
             queue: Vec::new(),
             current_queue_pos: None,
+            now_playing: None,
             library_state,
             queue_state: ListState::default(),
             playlist_state: ListState::default(),
@@ -148,7 +162,7 @@ impl App {
             path_index_dirty: true,
             playlists_cache: Vec::new(),
             playlists,
-            active_playlist: String::from("tui-queue"),
+            active_playlist: String::from(DEFAULT_QUEUE_PLAYLIST),
         };
 
         app.library_track_count = app.tracks.len();
@@ -173,6 +187,7 @@ impl App {
             return;
         };
 
+        self.now_playing = now_playing_name(&snapshot);
         self.queue.clear();
         for path in snapshot.queue {
             let idx = self.track_index_for_path_or_insert(Path::new(&path));
@@ -241,7 +256,11 @@ impl App {
         self.left_view = state.left_view;
         self.library_state.select(state.library_selected.filter(|i| *i < self.filtered.len()));
         self.queue_state.select(state.queue_selected.filter(|i| *i < self.queue_filtered.len()));
-        self.playlist_state.select(state.playlist_selected.filter(|i| *i < self.playlists_cache.len()));
+        let playlist_idx = state
+            .playlist_selected_name
+            .as_deref()
+            .and_then(|name| self.playlists_cache.iter().position(|p| p.name == name));
+        self.playlist_state.select(playlist_idx);
         if !state.active_playlist.trim().is_empty() {
             self.active_playlist = state.active_playlist;
         }
@@ -254,7 +273,7 @@ impl App {
             left_view: self.left_view,
             library_selected: self.library_state.selected(),
             queue_selected: self.queue_state.selected(),
-            playlist_selected: self.playlist_state.selected(),
+            playlist_selected_name: self.selected_playlist_name().map(str::to_string),
             active_playlist: self.active_playlist.clone(),
         };
         if let Ok(raw) = serde_json::to_string(&state) {
@@ -283,9 +302,10 @@ impl App {
             return;
         };
 
+        self.now_playing = now_playing_name(&snapshot);
         let mut daemon_queue = Vec::new();
-        for path in snapshot.queue {
-            let idx = self.track_index_for_path_or_insert(Path::new(&path));
+        for path in &snapshot.queue {
+            let idx = self.track_index_for_path_or_insert(Path::new(path));
             daemon_queue.push(idx);
         }
 
@@ -830,10 +850,25 @@ impl App {
                 inputs: vec![input],
             },
         )?;
-        self.current_queue_pos = None;
+
+        if self.active_playlist == DEFAULT_QUEUE_PLAYLIST {
+            // Default working queue: the chosen track becomes the new tui queue, so it is
+            // the current item and further additions append to it (rather than stopping it).
+            self.queue = vec![track_idx];
+            self.current_queue_pos = Some(0);
+            self.apply_queue_filter();
+            self.queue_state.select(Some(0));
+            let _ = self.persist_active_playlist();
+        } else {
+            // A named playlist is active: play this track standalone without touching the
+            // playlist. The queue keeps showing the playlist; playlist playback resumes only
+            // when a track is picked from the queue pane (see `play_queue_pos`).
+            self.current_queue_pos = None;
+        }
+
         let track = &self.tracks[track_idx];
         self.status = if started {
-            format!("playing single track {}", track.display_name())
+            format!("playing {}", track.display_name())
         } else {
             format!("updated playback to {}", track.display_name())
         };
@@ -1249,11 +1284,26 @@ fn render_queue(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     frame.render_stateful_widget(list, area, &mut app.queue_state);
 }
 
+/// Display name of the track the daemon reports as currently playing, from its snapshot.
+/// Prefers the explicit `playing` path (correct even when the track isn't in the queue),
+/// falling back to the queue/current index for snapshots written by older daemons.
+fn now_playing_name(snapshot: &process::DaemonSnapshot) -> Option<String> {
+    snapshot
+        .playing
+        .clone()
+        .or_else(|| {
+            snapshot
+                .current
+                .and_then(|idx| snapshot.queue.get(idx))
+                .cloned()
+        })
+        .map(|path| Track::from_path(PathBuf::from(path)).display_name())
+}
+
 fn render_now_playing(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let now = app
-        .current_queue_pos
-        .and_then(|pos| app.queue.get(pos))
-        .map(|idx| app.tracks[*idx].display_name())
+        .now_playing
+        .clone()
         .unwrap_or_else(|| String::from("nothing playing"));
 
     let text = vec![

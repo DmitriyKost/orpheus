@@ -1389,6 +1389,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "core-foundation",
  "crossterm",
  "ratatui",
  "rodio",

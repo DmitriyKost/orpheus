@@ -24,6 +24,11 @@ pub enum DaemonCommand {
 pub struct DaemonSnapshot {
     pub queue: Vec<String>,
     pub current: Option<usize>,
+    /// Path of the track the daemon is actually playing. Unlike `current` (an index into
+    /// `queue`) this still reflects playback when the playing track isn't part of the
+    /// queue — e.g. a standalone library pick played over a different active playlist.
+    #[serde(default)]
+    pub playing: Option<String>,
 }
 
 pub fn socket_path(data_dir: &Path) -> PathBuf {
@@ -185,6 +190,23 @@ fn spawn_daemon(data_dir: &Path) -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     let mut command = Command::new(&exe);
 
+    // macOS has no `setsid` binary, so detach the child into its own session from inside
+    // the forked process instead, mirroring what `setsid orpheus` does on Linux. Without
+    // this the daemon shares the launcher's process group and dies on terminal hangup.
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                // `setsid(2)` is async-signal-safe, so it is safe to call here.
+                if setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
     command
         .arg("play-internal")
         .stdin(Stdio::null())
@@ -193,6 +215,11 @@ fn spawn_daemon(data_dir: &Path) -> Result<()> {
         .spawn()?;
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn setsid() -> i32;
 }
 
 fn wait_for_socket(data_dir: &Path) -> Result<()> {
