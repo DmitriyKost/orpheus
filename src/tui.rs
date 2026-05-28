@@ -172,13 +172,25 @@ impl App {
         app.refresh_playlists();
 
         app.load_daemon_snapshot();
-        if !app.queue.is_empty() {
-            match app.sync_daemon_queue() {
-                Ok(_) => app.status = String::from("restored queue to daemon"),
-                Err(error) => app.status = format!("daemon restore failed ({error})"),
+        app.restore_ui_state();
+        if app.active_playlist == DEFAULT_QUEUE_PLAYLIST {
+            if !app.queue.is_empty() {
+                match app.sync_daemon_queue() {
+                    Ok(_) => app.status = String::from("restored queue to daemon"),
+                    Err(error) => app.status = format!("daemon restore failed ({error})"),
+                }
+            }
+        } else {
+            let active = app.active_playlist.clone();
+            match app.reload_queue_from_playlist(&active) {
+                Ok(_) => {
+                    app.current_queue_pos = None;
+                }
+                Err(error) => {
+                    app.status = format!("failed to load playlist '{}' ({error})", app.active_playlist)
+                }
             }
         }
-        app.restore_ui_state();
         Ok(app)
     }
 
@@ -263,6 +275,7 @@ impl App {
         self.playlist_state.select(playlist_idx);
         if !state.active_playlist.trim().is_empty() {
             self.active_playlist = state.active_playlist;
+            self.ensure_active_playlist_exists();
         }
         self.normalize_selection();
     }
