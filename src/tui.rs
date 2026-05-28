@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant, SystemTime},
@@ -11,24 +10,26 @@ use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{config::Config, library::Track, playlist::{PlaylistStore, PlaylistSummary}, process};
+use crate::{
+    config::Config,
+    library::Track,
+    playlist::{PlaylistStore, PlaylistSummary},
+    process,
+};
 
-/// Name of the default working queue playlist. While this is the active playlist, picking
-/// a single library track makes it the new queue; once a named playlist is active instead,
-/// a library pick plays standalone without disturbing that playlist.
-const DEFAULT_QUEUE_PLAYLIST: &str = "tui-queue";
+const DEFAULT_QUEUE_PLAYLIST: &str = "Queue";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Pane {
@@ -117,8 +118,6 @@ struct UiState {
     left_view: LeftView,
     library_selected: Option<usize>,
     queue_selected: Option<usize>,
-    // Persisted by name, not index: playlists are sorted by name, so a stored index points
-    // at a different playlist once the list changes (e.g. after creating a new one).
     #[serde(default)]
     playlist_selected_name: Option<String>,
     active_playlist: String,
@@ -166,32 +165,47 @@ impl App {
         };
 
         app.library_track_count = app.tracks.len();
+        app.initialize_state();
+        Ok(app)
+    }
 
-        app.ensure_active_playlist_exists();
-        app.apply_queue_filter();
-        app.refresh_playlists();
+    fn initialize_state(&mut self) {
+        self.ensure_active_playlist_exists();
+        self.apply_queue_filter();
+        self.refresh_playlists();
 
-        app.load_daemon_snapshot();
-        app.restore_ui_state();
-        if app.active_playlist == DEFAULT_QUEUE_PLAYLIST {
-            if !app.queue.is_empty() {
-                match app.sync_daemon_queue() {
-                    Ok(_) => app.status = String::from("restored queue to daemon"),
-                    Err(error) => app.status = format!("daemon restore failed ({error})"),
-                }
+        self.load_daemon_snapshot();
+        self.restore_ui_state();
+        self.refresh_playlists();
+        self.restore_queue_for_active_playlist();
+    }
+
+    fn restore_queue_for_active_playlist(&mut self) {
+        if self.active_playlist == DEFAULT_QUEUE_PLAYLIST {
+            if self.queue.is_empty() {
+                return;
             }
-        } else {
-            let active = app.active_playlist.clone();
-            match app.reload_queue_from_playlist(&active) {
-                Ok(_) => {
-                    app.current_queue_pos = None;
-                }
-                Err(error) => {
-                    app.status = format!("failed to load playlist '{}' ({error})", app.active_playlist)
-                }
+            match self.sync_daemon_queue() {
+                Ok(_) => self.status = String::from("restored queue to daemon"),
+                Err(error) => self.status = format!("daemon restore failed ({error})"),
+            }
+            return;
+        }
+
+        let active = self.active_playlist.clone();
+        match self.reload_queue_from_playlist(&active) {
+            Ok(_) => {
+                self.current_queue_pos = None;
+                self.queue_state
+                    .select(Some(0).filter(|_| !self.queue_filtered.is_empty()));
+            }
+            Err(error) => {
+                self.status = format!(
+                    "failed to load playlist '{}' ({error})",
+                    self.active_playlist
+                )
             }
         }
-        Ok(app)
     }
 
     fn load_daemon_snapshot(&mut self) {
@@ -243,9 +257,7 @@ impl App {
     }
 
     fn ensure_active_playlist_exists(&mut self) {
-        if self.playlists.create(&self.active_playlist).is_ok() {
-            return;
-        }
+        let _ = self.playlists.create(&self.active_playlist);
     }
 
     fn selected_playlist_name(&self) -> Option<&str> {
@@ -266,8 +278,13 @@ impl App {
         };
         self.active_pane = state.active_pane;
         self.left_view = state.left_view;
-        self.library_state.select(state.library_selected.filter(|i| *i < self.filtered.len()));
-        self.queue_state.select(state.queue_selected.filter(|i| *i < self.queue_filtered.len()));
+        self.library_state
+            .select(state.library_selected.filter(|i| *i < self.filtered.len()));
+        self.queue_state.select(
+            state
+                .queue_selected
+                .filter(|i| *i < self.queue_filtered.len()),
+        );
         let playlist_idx = state
             .playlist_selected_name
             .as_deref()
@@ -468,7 +485,9 @@ impl App {
                 }
             }
             KeyCode::Char('a') => self.append_selected_to_queue(),
-            KeyCode::Char('c') if self.active_pane == Pane::Library && self.left_view == LeftView::Playlists => {
+            KeyCode::Char('c')
+                if self.active_pane == Pane::Library && self.left_view == LeftView::Playlists =>
+            {
                 self.mode = Mode::Command;
                 self.command_input = String::from("plnew ");
             }
@@ -489,8 +508,12 @@ impl App {
     fn page_move(&mut self, delta: isize) {
         match self.active_pane {
             Pane::Library => match self.left_view {
-                LeftView::Library => select_relative(&mut self.library_state, self.filtered.len(), delta),
-                LeftView::Playlists => select_relative(&mut self.playlist_state, self.playlists_cache.len(), delta),
+                LeftView::Library => {
+                    select_relative(&mut self.library_state, self.filtered.len(), delta)
+                }
+                LeftView::Playlists => {
+                    select_relative(&mut self.playlist_state, self.playlists_cache.len(), delta)
+                }
             },
             Pane::Queue => select_relative(&mut self.queue_state, self.queue_filtered.len(), delta),
         }
@@ -614,8 +637,12 @@ impl App {
     fn select_next(&mut self) {
         match self.active_pane {
             Pane::Library => match self.left_view {
-                LeftView::Library => select_relative(&mut self.library_state, self.filtered.len(), 1),
-                LeftView::Playlists => select_relative(&mut self.playlist_state, self.playlists_cache.len(), 1),
+                LeftView::Library => {
+                    select_relative(&mut self.library_state, self.filtered.len(), 1)
+                }
+                LeftView::Playlists => {
+                    select_relative(&mut self.playlist_state, self.playlists_cache.len(), 1)
+                }
             },
             Pane::Queue => select_relative(&mut self.queue_state, self.queue_filtered.len(), 1),
         }
@@ -624,8 +651,12 @@ impl App {
     fn select_previous(&mut self) {
         match self.active_pane {
             Pane::Library => match self.left_view {
-                LeftView::Library => select_relative(&mut self.library_state, self.filtered.len(), -1),
-                LeftView::Playlists => select_relative(&mut self.playlist_state, self.playlists_cache.len(), -1),
+                LeftView::Library => {
+                    select_relative(&mut self.library_state, self.filtered.len(), -1)
+                }
+                LeftView::Playlists => {
+                    select_relative(&mut self.playlist_state, self.playlists_cache.len(), -1)
+                }
             },
             Pane::Queue => select_relative(&mut self.queue_state, self.queue_filtered.len(), -1),
         }
@@ -633,8 +664,14 @@ impl App {
 
     fn select_first(&mut self) {
         match self.active_pane {
-            Pane::Library if self.left_view == LeftView::Library && !self.filtered.is_empty() => self.library_state.select(Some(0)),
-            Pane::Library if self.left_view == LeftView::Playlists && !self.playlists_cache.is_empty() => self.playlist_state.select(Some(0)),
+            Pane::Library if self.left_view == LeftView::Library && !self.filtered.is_empty() => {
+                self.library_state.select(Some(0))
+            }
+            Pane::Library
+                if self.left_view == LeftView::Playlists && !self.playlists_cache.is_empty() =>
+            {
+                self.playlist_state.select(Some(0))
+            }
             Pane::Queue if !self.queue_filtered.is_empty() => self.queue_state.select(Some(0)),
             _ => {}
         }
@@ -645,8 +682,11 @@ impl App {
             Pane::Library if self.left_view == LeftView::Library && !self.filtered.is_empty() => {
                 self.library_state.select(Some(self.filtered.len() - 1));
             }
-            Pane::Library if self.left_view == LeftView::Playlists && !self.playlists_cache.is_empty() => {
-                self.playlist_state.select(Some(self.playlists_cache.len() - 1));
+            Pane::Library
+                if self.left_view == LeftView::Playlists && !self.playlists_cache.is_empty() =>
+            {
+                self.playlist_state
+                    .select(Some(self.playlists_cache.len() - 1));
             }
             Pane::Queue if !self.queue_filtered.is_empty() => {
                 self.queue_state.select(Some(self.queue_filtered.len() - 1))
@@ -1069,9 +1109,9 @@ impl App {
             }
         } else {
             match cmd.as_str() {
-            "q" | "quit" => self.should_quit = true,
-            "" => {}
-            other => self.status = format!("unknown command: :{other}"),
+                "q" | "quit" => self.should_quit = true,
+                "" => {}
+                other => self.status = format!("unknown command: :{other}"),
             }
         }
         self.command_input.clear();
@@ -1192,7 +1232,11 @@ fn render_library(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
                 })
                 .collect::<Vec<_>>();
             let title = if !app.search.is_empty() && app.search_target == Pane::Library {
-                format!("Library [{} track(s)]  filter: /{}", app.filtered.len(), app.search)
+                format!(
+                    "Library [{} track(s)]  filter: /{}",
+                    app.filtered.len(),
+                    app.search
+                )
             } else {
                 format!("Library {} track(s)", app.filtered.len())
             };
@@ -1266,7 +1310,11 @@ fn render_queue(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             app.search
         )
     } else {
-        format!("Queue {} item(s) [{}]", app.queue.len(), app.active_playlist)
+        format!(
+            "Queue {} item(s) [{}]",
+            app.queue.len(),
+            app.active_playlist
+        )
     };
 
     let active_color = if app.mode == Mode::Search && app.search_target == Pane::Queue {
@@ -1320,7 +1368,7 @@ fn render_now_playing(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
         .unwrap_or_else(|| String::from("nothing playing"));
 
     let text = vec![
-        Line::from(format!("{now}")),
+        Line::from(now),
         Line::from(format!(
             "background mode  music: {}",
             app.config.music_dir.display()

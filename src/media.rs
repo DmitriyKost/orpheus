@@ -60,9 +60,13 @@ impl MediaSession {
                         let action = match event {
                             souvlaki::MediaControlEvent::Play => Some(MediaControlAction::Play),
                             souvlaki::MediaControlEvent::Pause => Some(MediaControlAction::Pause),
-                            souvlaki::MediaControlEvent::Toggle => Some(MediaControlAction::PlayPause),
+                            souvlaki::MediaControlEvent::Toggle => {
+                                Some(MediaControlAction::PlayPause)
+                            }
                             souvlaki::MediaControlEvent::Next => Some(MediaControlAction::Next),
-                            souvlaki::MediaControlEvent::Previous => Some(MediaControlAction::Previous),
+                            souvlaki::MediaControlEvent::Previous => {
+                                Some(MediaControlAction::Previous)
+                            }
                             souvlaki::MediaControlEvent::Stop => Some(MediaControlAction::Stop),
                             _ => None,
                         };
@@ -204,7 +208,11 @@ impl MediaSession {
     /// Elapsed playback time of the current track, accounting for paused segments.
     #[cfg(target_os = "macos")]
     fn elapsed(&self) -> Duration {
-        self.elapsed_base + self.segment_start.map(|start| start.elapsed()).unwrap_or_default()
+        self.elapsed_base
+            + self
+                .segment_start
+                .map(|start| start.elapsed())
+                .unwrap_or_default()
     }
 
     /// Publish the given metadata + playback state to the OS media session.

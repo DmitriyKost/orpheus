@@ -13,6 +13,7 @@ use std::{
 use crate::{
     audio::{duration, NativePlayer},
     config::Config,
+    input::resolve_inputs,
     library::{Library, Track},
     media::{MediaControlAction, MediaSession},
     playlist::PlaylistStore,
@@ -44,7 +45,9 @@ pub fn run(config: Config, library: Library, playlists: PlaylistStore) -> Result
     let request_tx = event_tx.clone();
     let _socket_thread = thread::spawn(move || {
         for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue; };
+            let Ok(stream) = stream else {
+                continue;
+            };
             if let Err(error) = handle_stream(&request_tx, stream) {
                 eprintln!("daemon command error: {error}");
             }
@@ -90,7 +93,6 @@ pub fn run(config: Config, library: Library, playlists: PlaylistStore) -> Result
         if state.on_audio_tick()? {
             break Ok(());
         }
-
     };
 
     drop(event_rx);
@@ -114,7 +116,10 @@ fn handle_stream(request_tx: &mpsc::Sender<CoreEvent>, stream: UnixStream) -> Re
     reader.read_line(&mut line)?;
     let command: DaemonCommand = serde_json::from_str(line.trim())?;
     let (response_tx, response_rx) = mpsc::channel();
-    request_tx.send(CoreEvent::Request(DaemonRequest { command, response_tx }))?;
+    request_tx.send(CoreEvent::Request(DaemonRequest {
+        command,
+        response_tx,
+    }))?;
     let response = response_rx.recv()?;
 
     let mut stream = reader.into_inner();
@@ -273,7 +278,9 @@ impl DaemonState {
     }
 
     fn play_current(&mut self) -> Result<()> {
-        let Some(idx) = self.current else { return Ok(()); };
+        let Some(idx) = self.current else {
+            return Ok(());
+        };
         let path = self.queue[idx].path.clone();
         // Start audio before publishing metadata: macOS only accepts Now Playing info
         // once the process is the active audio app, which CoreAudio output establishes.
@@ -367,8 +374,12 @@ impl DaemonState {
         if !force_reload && !self.player.is_empty() {
             return Ok(());
         }
-        let Some(idx) = self.current else { return Ok(()); };
-        let Some(path) = self.queue.get(idx).map(|track| track.path.clone()) else { return Ok(()); };
+        let Some(idx) = self.current else {
+            return Ok(());
+        };
+        let Some(path) = self.queue.get(idx).map(|track| track.path.clone()) else {
+            return Ok(());
+        };
         self.player.play(&path)?;
         self.player.pause();
         self.playing_path = Some(path.to_string_lossy().to_string());
@@ -377,29 +388,4 @@ impl DaemonState {
         self.media.set_paused();
         Ok(())
     }
-}
-
-fn resolve_inputs(library: &Library, playlists: &PlaylistStore, inputs: &[String]) -> Result<Vec<Track>> {
-    if inputs.is_empty() {
-        return Ok(library.scan()?);
-    }
-
-    let mut tracks = Vec::new();
-    for input in inputs {
-        tracks.extend(resolve_one_input(playlists, input)?);
-    }
-    Ok(tracks)
-}
-
-fn resolve_one_input(playlists: &PlaylistStore, input: &str) -> Result<Vec<Track>> {
-    let input_path = std::path::PathBuf::from(input);
-    if input_path.exists() {
-        if input_path.is_dir() {
-            return Ok(Library::new(input_path).scan()?);
-        }
-        return Ok(vec![Track::from_path(input_path)]);
-    }
-
-    let playlist_tracks = playlists.read(input)?;
-    Ok(playlist_tracks.into_iter().map(Track::from_path).collect())
 }

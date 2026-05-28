@@ -24,8 +24,12 @@ impl PlaylistStore {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("m3u") {
-                let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue; };
-                playlists.push(PlaylistSummary { name: name.to_string() });
+                let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                playlists.push(PlaylistSummary {
+                    name: name.to_string(),
+                });
             }
         }
         playlists.sort_by_key(|p| p.name.to_lowercase());
@@ -49,7 +53,8 @@ impl PlaylistStore {
 
     pub fn read(&self, name: &str) -> Result<Vec<PathBuf>> {
         let path = self.path_for(name)?;
-        let content = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
         Ok(content
             .lines()
             .map(str::trim)
@@ -89,7 +94,9 @@ impl PlaylistStore {
 
         let dir_canon = self.dir.canonicalize().unwrap_or_else(|_| self.dir.clone());
         let parent = path.parent().unwrap_or(&self.dir);
-        let parent_canon = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+        let parent_canon = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
         if !parent_canon.starts_with(&dir_canon) {
             anyhow::bail!("invalid playlist name: {name}");
         }

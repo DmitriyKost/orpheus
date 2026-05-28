@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(name = "orpheus", version, about = "Small native terminal music player")]
+#[command(
+    name = "orpheus",
+    version,
+    about = "Small native terminal music player"
+)]
 pub struct Cli {
     /// Override the configured music directory.
     #[arg(long, global = true)]

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     fs::File,
-    io::{Read, Write},
     io::ErrorKind,
+    io::{Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -14,9 +14,17 @@ use std::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonCommand {
-    Replace { inputs: Vec<String> },
-    ReplaceFrom { inputs: Vec<String>, start: usize },
-    UpdateQueue { inputs: Vec<String>, current: Option<usize> },
+    Replace {
+        inputs: Vec<String>,
+    },
+    ReplaceFrom {
+        inputs: Vec<String>,
+        start: usize,
+    },
+    UpdateQueue {
+        inputs: Vec<String>,
+        current: Option<usize>,
+    },
     Stop,
 }
 
@@ -66,10 +74,7 @@ pub fn write_snapshot(data_dir: &Path, snapshot: &DaemonSnapshot) -> Result<()> 
 }
 
 pub fn send_command(data_dir: &Path, command: &DaemonCommand) -> Result<()> {
-    send_command_internal(data_dir, command).map_err(|error| match error {
-        SendCommandError::Transport(message) => anyhow::anyhow!(message),
-        SendCommandError::Daemon(message) => anyhow::anyhow!(message),
-    })
+    send_command_internal(data_dir, command).map_err(map_send_command_error)
 }
 
 enum SendCommandError {
@@ -77,30 +82,37 @@ enum SendCommandError {
     Daemon(String),
 }
 
-fn send_command_internal(data_dir: &Path, command: &DaemonCommand) -> std::result::Result<(), SendCommandError> {
+fn send_command_internal(
+    data_dir: &Path,
+    command: &DaemonCommand,
+) -> std::result::Result<(), SendCommandError> {
     let mut stream = UnixStream::connect(socket_path(data_dir)).map_err(|error| {
         if matches!(
             error.kind(),
-            ErrorKind::NotFound | ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset | ErrorKind::AddrNotAvailable
+            ErrorKind::NotFound
+                | ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionReset
+                | ErrorKind::AddrNotAvailable
         ) {
             SendCommandError::Transport("daemon is not running".to_string())
         } else {
             SendCommandError::Transport(format!("daemon transport error: {error}"))
         }
     })?;
-    let payload = serde_json::to_string(command)
-        .map_err(|error| SendCommandError::Daemon(format!("failed to serialize command: {error}")))?;
-    stream
-        .write_all(payload.as_bytes())
-        .map_err(|error| SendCommandError::Transport(format!("failed to write command: {error}")))?;
-    stream
-        .write_all(b"\n")
-        .map_err(|error| SendCommandError::Transport(format!("failed to write command terminator: {error}")))?;
+    let payload = serde_json::to_string(command).map_err(|error| {
+        SendCommandError::Daemon(format!("failed to serialize command: {error}"))
+    })?;
+    stream.write_all(payload.as_bytes()).map_err(|error| {
+        SendCommandError::Transport(format!("failed to write command: {error}"))
+    })?;
+    stream.write_all(b"\n").map_err(|error| {
+        SendCommandError::Transport(format!("failed to write command terminator: {error}"))
+    })?;
 
     let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| SendCommandError::Transport(format!("failed to read daemon response: {error}")))?;
+    stream.read_to_string(&mut response).map_err(|error| {
+        SendCommandError::Transport(format!("failed to read daemon response: {error}"))
+    })?;
     if response.trim() == "ok" {
         Ok(())
     } else {
@@ -126,11 +138,16 @@ pub fn ensure_daemon_and_send_command(data_dir: &Path, command: &DaemonCommand) 
 
     spawn_daemon(data_dir)?;
     wait_for_socket(data_dir)?;
-    send_command_internal(data_dir, command).map_err(|error| match error {
-        SendCommandError::Transport(message) => anyhow::anyhow!(message),
-        SendCommandError::Daemon(message) => anyhow::anyhow!(message),
-    })?;
+    send_command_internal(data_dir, command).map_err(map_send_command_error)?;
     Ok(true)
+}
+
+fn map_send_command_error(error: SendCommandError) -> anyhow::Error {
+    match error {
+        SendCommandError::Transport(message) | SendCommandError::Daemon(message) => {
+            anyhow::anyhow!(message)
+        }
+    }
 }
 
 pub fn wait_for_current_index(data_dir: &Path, expected: usize, timeout: Duration) -> Result<()> {

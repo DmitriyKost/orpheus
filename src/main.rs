@@ -2,23 +2,25 @@ mod audio;
 mod cli;
 mod config;
 mod daemon;
+mod input;
 mod library;
 mod media;
 mod playlist;
 mod process;
 mod tui;
 
-use anyhow::Result;
-use clap::{CommandFactory, Parser};
-use clap_complete::{Generator, Shell as ClapShell, generate};
 use crate::{
     audio::{duration, NativePlayer},
     cli::{Cli, Command, PlaylistCommand, Shell},
     config::Config,
+    input::resolve_inputs,
     library::{Library, Track},
     media::MediaSession,
     playlist::PlaylistStore,
 };
+use anyhow::Result;
+use clap::{CommandFactory, Parser};
+use clap_complete::{generate, Generator, Shell as ClapShell};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -57,7 +59,7 @@ fn main() -> Result<()> {
         Command::Completion { shell } => {
             print_completion(shell);
         }
-        Command::PlayInternal { .. } => {
+        Command::PlayInternal => {
             daemon::run(config, library, playlists)?;
         }
         Command::Playlist { command } => match command {
@@ -101,7 +103,12 @@ fn print_completion(shell: Shell) {
 }
 
 fn generate_for<G: Generator>(generator: G, cmd: &mut clap::Command) {
-    generate(generator, cmd, cmd.get_name().to_string(), &mut std::io::stdout());
+    generate(
+        generator,
+        cmd,
+        cmd.get_name().to_string(),
+        &mut std::io::stdout(),
+    );
 }
 
 fn play_tracks(tracks: Vec<Track>) -> Result<()> {
@@ -121,29 +128,4 @@ fn play_tracks(tracks: Vec<Track>) -> Result<()> {
 
     media.finished();
     Ok(())
-}
-
-fn resolve_inputs(library: &Library, playlists: &PlaylistStore, inputs: &[String]) -> Result<Vec<library::Track>> {
-    if inputs.is_empty() {
-        return Ok(library.scan()?);
-    }
-
-    let mut tracks = Vec::new();
-    for input in inputs {
-        tracks.extend(resolve_one_input(playlists, input)?);
-    }
-    Ok(tracks)
-}
-
-fn resolve_one_input(playlists: &PlaylistStore, input: &str) -> Result<Vec<library::Track>> {
-    let input_path = std::path::PathBuf::from(input);
-    if input_path.exists() {
-        if input_path.is_dir() {
-            return Ok(Library::new(input_path).scan()?);
-        }
-        return Ok(vec![library::Track::from_path(input_path)]);
-    }
-
-    let playlist_tracks = playlists.read(input)?;
-    Ok(playlist_tracks.into_iter().map(library::Track::from_path).collect())
 }

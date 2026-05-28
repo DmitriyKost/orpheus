@@ -9,10 +9,14 @@ pub struct NativePlayer {
 
 impl NativePlayer {
     pub fn new() -> Result<Self> {
-        let mut sink = DeviceSinkBuilder::open_default_sink().context("failed to open default audio output")?;
+        let mut sink = DeviceSinkBuilder::open_default_sink()
+            .context("failed to open default audio output")?;
         sink.log_on_drop(false);
         let player = Player::connect_new(sink.mixer());
-        Ok(Self { _sink: sink, player })
+        Ok(Self {
+            _sink: sink,
+            player,
+        })
     }
 
     pub fn play(&mut self, path: &Path) -> Result<()> {
@@ -23,8 +27,10 @@ impl NativePlayer {
     }
 
     pub fn append(&self, path: &Path) -> Result<()> {
-        let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        let source = Decoder::try_from(file).with_context(|| format!("failed to decode {}", path.display()))?;
+        let file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let source = Decoder::try_from(file)
+            .with_context(|| format!("failed to decode {}", path.display()))?;
         self.player.append(source);
         Ok(())
     }
