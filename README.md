@@ -58,13 +58,18 @@ orpheus stop
 ## TUI Workflow
 
 - Use `h/j/k/l`, `gg`, `G`, `Ctrl-d`, `Ctrl-u` to navigate
-- Press `Enter` on library or queue item to start playback from that position
-- Press `a` to append selected library track to queue
+- Press `p` in the left pane to toggle **Library** / **Playlists** view
+- Press `Enter` on a **library track** to play that single track immediately (does not replace queue)
+- Press `Enter` on a **playlist** to load it as the active queue and start playback from item 1
+- Press `a` to append selected library track to the active playlist-backed queue
 - Press `dd` to remove selected queue entry
+- Press `dj` / `dk` to delete selected+next / selected+previous queue entries
 - Press `J` / `K` to move selected queue entry down/up
 - Press `/` to search in active pane (Library or Queue)
 - Press `Esc` to clear active search filter
-- Press `v` to edit `tui-queue` in `$EDITOR` (defaults to `nvim`) and return to TUI
+- Press `S` to save current queue to the active playlist
+- Press `v` to edit the active playlist in `$EDITOR` (defaults to `nvim`) and return to TUI
+- In Playlists view: `c` opens command mode with `plnew `, `dd` deletes selected playlist
 - Use `:q` or `ZZ` to quit
 
 ## TUI Keys
@@ -74,15 +79,19 @@ h/j/k/l          pane + movement
 gg, G            first / last
 Ctrl-d / Ctrl-u  page down / page up
 Tab              switch Library / Queue pane
-Enter            play from selected item
-a                append selected library track to queue
-dd               remove selected queue item
+Enter            library: play single track; playlists: activate playlist; queue: play selected item
+p                toggle left pane: Library / Playlists
+a                append selected library track to active queue
+dd               queue: remove selected item; playlists: delete selected playlist
+dj / dk          queue: delete selected+next / selected+previous
 J / K            move selected queue item down / up
 /                search active pane
 Esc              clear search filter
-S                save queue as 'tui-queue'
-v                edit 'tui-queue' in editor, then return
+S                save queue to active playlist
+v                edit active playlist in editor, then return
+c                in Playlists view: open command mode with `plnew `
 :                command mode
+:plnew <name>    create playlist
 :q               quit
 ZZ               quit
 ```
@@ -118,6 +127,12 @@ orpheus playlist add favorites ~/Music/a.flac ~/Music/b.mp3
 orpheus playlist show favorites
 orpheus playlist delete favorites
 ```
+
+TUI queue model:
+
+- The queue is backed by the currently active playlist (default: `tui-queue`).
+- Queue edits in TUI (`a`, `dd`, `dj`, `dk`, `J`, `K`, `S`, editor save) update playlist content on disk.
+- The queue pane title shows the active playlist name.
 
 ## Configuration
 
